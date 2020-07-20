@@ -5,7 +5,7 @@ import Core as C
 import Prelude hiding (lookup)
 import Data.List hiding (lookup, insert)
 import Control.Monad
-import Control.Applicative
+import Control.Applicative hiding (Const)
 import Data.Functor
 import Data.Map
 import Data.Either
@@ -48,13 +48,7 @@ Solution: (Match should be annotated)
 
 -}
 
-data UseInfo
-  = UEmpty
-  | UVar  Info
-  | UPlus UseInfo UseInfo
-  | UMult Mult UseInfo
-
-type Uses = [UseInfo]
+type Uses = [[(Mult,Info)]]
 
 data ElabError
   -- core
@@ -64,13 +58,17 @@ data ElabError
   | NoSuitableDefinition Info
   -- type errors
   | ExpectedFunction Info Term
+  | UnexpectedFunction Info Term
   | SynthHole Info
   | SynthLambda Info
-  | UnboundVar Info  
+  | UnboundVar Info
+  | InvalidType Term
   -- multiplicity errors
-  | RelevantUseOfErased Info -- erased argument used once or unrestrictedly
-  | VariableAlreadyUsed Info -- linear variable already used once
-  | VariableUsedUnrestrictedly Info -- linear variable in unrestricted context
+  | Unused Info -- linear variable is unused
+  | RelevantUse Info -- erased argument used once or unrestrictedly
+  | MultipleUse Info -- linear variable already used once
+  | UnrestrictedUse Info -- linear variable in unrestricted context
+  | MultiplicityMismatch Info Term
 
 data Result a
   = Clear a
@@ -221,6 +219,20 @@ getObject f i = do
 getContext :: Elab Context
 getContext = Elab (\ctx st -> Right (st, Clear ctx))
 
+
+useSum :: [(Mult,Info)] -> Mult
+useSum = Data.List.foldr (plus . fst) Zero
+
+availability :: Context -> Uses -> Mult
+availability [] _ = Many
+availability (hyp:hyps) (use:uses) = multMin (availability hyps uses) (case (hypMult hyp, useSum use) of
+    (Zero,One)  -> Zero
+    (Zero,Many) -> Zero
+    (One,Many)  -> Zero 
+    (One, One)  -> One
+    _           -> Many)
+    
+
 freshId :: Elab Int
 freshId = do
   st <- get
@@ -254,16 +266,17 @@ addDeclaration v x = addGlobal (\obs -> obs {globalDecl = insert v x (globalDecl
 
 typeofRef :: C.Reference -> Elab Term
 typeofRef ref = case ref of
-  IndRef i     -> getObject globalInd i <&> indSort
-  FixRef i _ _ -> getObject globalFix i <&> fixType
-  ConRef i j   -> getObject globalInd i <&> (\i -> introRules i !! j)
-  DefRef i _   -> getObject globalDef i <&> (\(ty,_,_) -> ty)
+  IndRef i     -> indSort <$> getObject globalInd i
+  FixRef i _ _ -> fixType <$> getObject globalFix i
+  ConRef i j   -> (\i -> introRules i !! j) <$> getObject globalInd i
+  DefRef i _   -> (\(ty,_,_) -> ty) <$> getObject globalDef i
   DeclRef i    -> getObject globalDecl i
 
+convertible :: Term -> Term -> Elab ()
 convertible = undefined
 
 noUses :: Uses
-noUses = repeat UEmpty
+noUses = repeat []
 
 disambiguate :: Info -> Name -> Elab (Term,Term,Uses)
 disambiguate info name = do
@@ -284,26 +297,79 @@ useLocal :: Info -> Name -> Elab (Term,Term,Uses)
 useLocal info name = getContext >>= f 0 where
   f n [] = fatalError (UnboundVar info)
   f n (hyp:hyps)
-    | name == hypName hyp = pure (UVar info : fmap (const UEmpty) hyps, Var info n, hypType hyp)
+    | name == hypName hyp = pure (Var info n, hypType hyp, [(One,info)] : noUses)
     | otherwise = do
-      (uses,t,ty) <- f (n + 1) hyps
-      pure (UEmpty : uses, t, ty)
+      (t,ty,uses) <- f (n + 1) hyps
+      pure (t, ty, [] : uses)
 
 
 withContext :: (Context -> Context) -> Elab a -> Elab a
 withContext f (Elab g) = Elab (\ctx st -> g (f ctx) st)
 
-pushContext :: Hypothesis -> Elab a -> Elab a
-pushContext hyp (Elab f) = Elab (\ctx -> f (hyp:ctx))
+typeOf :: Term -> Elab Term
+typeOf (Var _ n) = fmap (\ctx -> hypType (ctx !! n)) getContext
+typeOf (App _ f a) = do
+    (Pi _ _ _ _ tb) <- typeOf f
+    pure (subst a tb)
+typeOf (Sort _ l) = pure (Sort Nothing (l + 1))
+typeOf (Pi _ m v ta tb) = do
+  ka <- typeOf ta
+  let hyp = Hypothesis {
+                hypType = ta,
+                hypMult = m,
+                hypName = v,
+                hypDef = Nothing}
+  kb <- withContext (hyp:)(typeOf tb)
+  case (ka,kb) of
+        (Sort _ n, Sort _ 0) -> pure (Sort Nothing 0)
+        (Sort _ n, Sort _ m) -> pure (Sort Nothing (max n m))  
+typeOf (Const _ ref)   = typeofRef ref >>= typeOf
+typeOf (Lam _ m v ta b) = let
+  hyp = Hypothesis {
+    hypType = ta,
+    hypMult = m,
+    hypName = v,
+    hypDef = Nothing}
+  in withContext (hyp:) (typeOf b)
+typeOf (Let _ m v ta a b) = let
+  hyp = Hypothesis {
+    hypType = ta,
+    hypMult = m,
+    hypName = v,
+    hypDef = Just a}
+  in withContext (hyp:) (typeOf b)
+typeOf (Case _ dat) = typeOf (App Nothing (motive dat) (eliminee dat))
 
-sortOf :: Term -> Elab Term
-sortOf (Sort _ l)      = pure (Sort Nothing (l + 1))
-sortOf (Pi _ _ _ _ tb) = pure (sortOf tb)
-sortOf (Const ref)     = sortOf <$> typeofRef
+checkPi :: Term -> Term -> Elab Term
+checkPi ta tb = do
+    ka <- typeOf ta
+    kb <- typeOf tb
+    case (ka,kb) of
+        (Sort _ n, Sort _ 0) -> pure (Sort Nothing 0)
+        (Sort _ n, Sort _ m) -> pure (Sort Nothing (max n m))
 
-checkPi :: Term -> Term -> Elab ()
-checkPi ta tb = undefined
-  
+plusUses :: Uses -> Uses -> Uses
+plusUses = zipWith (++)
+
+timesUses :: Mult -> Uses -> Uses
+timesUses m xs = fmap (fmap (\(m',i) -> (times m m',i))) xs
+
+checkArgMult :: Info -> Mult -> [(Mult,Info)] -> Elab ()
+checkArgMult _ Many _ = pure ()
+checkArgMult _ Zero uses = mapM_ f uses where
+    f (Zero,_) = pure ()
+    f (_,info) = typeError (RelevantUse info)
+checkArgMult info One uses = Data.List.foldr g (pure One) uses >>= h where
+    f (Zero,_) m = pure m
+    f (One,_) Zero = pure One
+    f (One,info) _ = typeError (MultipleUse info) 
+    f (Many,info) _ = typeError (UnrestrictedUse info)
+
+    g use acc = do
+        acc >>= f use
+
+    h Zero = pure ()
+    h One  = typeError (Unused info)
 
 synth :: Expr -> Elab (Term,Term,Uses)
 synth expr = case expr of
@@ -313,83 +379,80 @@ synth expr = case expr of
   EApply info f a -> do
     (f,tf,uf) <- synth f
     (info', m, ta, tb) <- (case tf of
-      Pi info m _ ta tb -> (info,m,ta,tb)
+      Pi info m _ ta tb -> pure (info,m,ta,tb)
       x -> typeError (ExpectedFunction info x))
-    (a,ua) <- check a
-    pure (App info f a, subst a tb, zipWith UPlus uf (fmap (UMult m) ua))
-  ELet info name ta a b -> do
+    (a,ua) <- check a ta
+    pure (App info f a, subst a tb, plusUses uf (timesUses m ua))
+  ELet info bind ta a b -> do
     (a,ta,ua) <- (case ta of
       Nothing -> synth a
       Just ta -> do
-        (ta,ka,_) <- synth ta
+        (ta,_,_) <- synth ta
         (a,ua) <- check a ta
         pure (a,ta,ua))
-    let hyp = Hypothesis {
-      hypName = binderName name,
-      hypMult = Many,
-      hypType = ty,
-      hypDef  = Just term}
-    (b,tb,(ux:ub)) <- pushContext hyp (synth b)
-    {- ATTENTION -}
-    pure (Let info (mult ua ux) name ta a b, tb, zipWith UPlus ub (fmap (UMult Many))
+    ctx <- getContext
+    let heur = availability ctx ua
+        name = binderName bind
+        hyp = Hypothesis {
+          hypName = name,
+          hypMult = heur,
+          hypType = ta,
+          hypDef  = Just a}
+    (b,tb,(ux:ub)) <- withContext (hyp:) (synth b)
+    let u = case ux of
+            [] -> Zero
+            (u,_) : _ -> u
+    pure (Let info heur name ta a b, tb, plusUses (timesUses u ua) ub) 
   ELambda info _ _ Nothing _ -> fatalError (SynthLambda info)
   ELambda info m bind (Just ta) b -> do
     (ta,ka,_) <- synth ta
     let name = binderName bind
+        info' = binderSpan bind
         hyp = Hypothesis {
           hypName = name,
-          hypMult = mult,
-          hypType = ty,
+          hypMult = m,
+          hypType = ta,
           hypDef  = Nothing}
-    (b,tb,(ux:ub)) <- pushContext hyp (synth b)
+    (b,tb,(ux:ub)) <- withContext (hyp:) (synth b)
     checkPi ta tb
-    checkArgMult name m ux
+    checkArgMult info' m ux
     pure (Lam info m name ta b, Pi Nothing m name ta tb, ub)
-    
-    (m,ty,k) <- withContext (timesContext Zero) (synth ty)
-    let hyp = Hypothesis {
-      hypName = binderName name,
-      hypMult = mult,
-      hypType = ty,
-      hypDef  = Nothing}
-    (n,body,bodyty) <- pushContext hyp (synth body)
-    undefined
-    
-    
-    
-    
+  EPi info m bind ta tb -> do
+    (ta,_,ua) <- synth ta
+    (tb,kb,ub) <- synth tb
+    checkPi ta tb
+    let name = maybe "" binderName bind
+    pure (Pi info m name ta tb, kb, plusUses ua ub) -- make uses relevant
+  EMatch info term cases -> undefined-- assume non-dependent return type
+  ELetRec info funs a -> undefined -- hard
+
 
 subst :: Term -> Term -> Term
 subst = undefined
 
-check :: Expr -> Term -> Elab (Mult,Term)
-check = undefined
+check :: Expr -> Term -> Elab (Term,Uses)
+check (ELambda info m bind Nothing b) ty = do
+    (m', ta, tb) <- (case ty of
+        Pi _ m' _ ta tb -> pure (m', ta, tb)
+        x -> typeError (UnexpectedFunction info x))
+    if m == m' then pure () else typeError (MultiplicityMismatch info ty)
+    let name = binderName bind
+        hyp = Hypothesis {
+            hypName = name,
+            hypMult = m,
+            hypType = ta,
+            hypDef  = Nothing}
+    withContext (hyp:) 
+    undefined
+check a ta = do
+    (a,ta',ua) <- synth a
+    convertible ta ta'
+    pure (a,ua)
+  -- lambda un-annotated
+  -- case : check if scrutinee is rel, transform return type
  
 
-{-
 
-
-{- /IN ENVIRONMENT -}
-
-{- IN REDUCTION -}
-
-
-{- /IN REDUCTION -}
-
-{-
-  find variable in context,
-  otherwise globally,
-  otherise in some namespace,
-  invent some conflict resolution
--}
-
--}
-
-{-
-
-
-
--}
 
 {-
   consider nested fixpoints as well

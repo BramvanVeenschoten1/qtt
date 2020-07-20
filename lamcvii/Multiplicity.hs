@@ -25,12 +25,12 @@ plus Zero x   = x
 plus One Zero = One
 plus _   _    = Many
 
-mmin :: Mult -> Mult -> Mult
-mmin Zero _ = Zero
-mmin _ Zero = Zero
-mmin One _  = One
-mmin _ One  = One
-mmin _ _    = Many
+multMin :: Mult -> Mult -> Mult
+multMin Zero _ = Zero
+multMin _ Zero = Zero
+multMin One _  = One
+multMin _ One  = One
+multMin _ _    = Many
 
 intersect :: Mult -> Mult -> Mult
 intersect Zero Zero = Zero
