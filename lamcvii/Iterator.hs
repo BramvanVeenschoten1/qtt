@@ -3,6 +3,8 @@ module Iterator where
 import Core
 import Data.List
 
+{- based on the matita kernel -}
+
 {-
 fold visits the term t accumulating in
 
