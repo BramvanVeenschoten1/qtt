@@ -3,24 +3,16 @@ implementation of quantitative type theory with an impredicative sort and non-in
 
 A work in progress, this repository contains mostly reused source files from the authors earlier projects, interjected with notes.
 
-The core language is now defined and features:
+The core language features:
 - dependent products with multiplicity annotations based on quantitative type theory
-- non-mutual, non-indexed inductive types that allow nested recursion, with multiplicity annotations on the arguments
-- non-mutual recursive functions that allow nested recursion
-- simple dependent case distinction expressions
+- non-nested, non-indexed, mutual inductive types, with multiplicity annotations on the arguments
+- non-nested, mutual recursive functions
+- simple dependent case distinction expressions, with multiplicity annotations on the discriminee
 
-A prototype elaborator for a higher level language is intended to expand:
-- mutual recursive inductive types
-- mutual recursive function definitions at both top level and expression level
-- type driven disambiguation of imported names
+The elaborator features
+- type-driven disambiguation of names from different modules
+- no modules
+- a bidirectional type checking algorithm
 
-Note that this elaborator makes no use of unification whatsoever.
-
-Future extensions may include:
-- implicit function arguments (inferred by unification)
-- universes
-- indexed inductive types
-- idris-style do-notation
-
-code generation and libraries are well beyond the authors short term goals.
+Notes on future features can be found in lamcvii/Main.hs
 
