@@ -11,525 +11,433 @@ import Data.Map
 import Data.Either
 import Data.Maybe
 
+import Lexer(Loc)
+import Parser(Binder)
+import Normalization
+import Substitution
+import Typechecker
 import Multiplicity
 import Parser
-import Core(Term(..), Context, Error(..))
+import Core(Term(..), Context)
+import Elaborator
+import Prettyprint
 
-{-
-The high-level language must provide:
-  a map from qualified variables to (Info, Object)
-  a map from unqualified variables to sets of candidate objects
-  
-Name resolution:
-  Checking for each candidate seems expensive, but explore anyway:
-    synthesis may now yield a set of types for a variable
-    multiple variables yield greater sets.
-    an unambiguous term should yield a singleton
-    we can check agains each of these
-    given an ambiguity, we must identify the culprit variables
-    a type set is a product of the variations of each ambiguous variable
-    local variables may shadow globals and take precedence, so the context remains untouched
-    a set of possibilities is either a singleton or a given variable with a map to possibilities
-    
-    options are:
-      unqualified
-      qualified under current context
-      fully qualified
-
-Consider some decidable holes:
-  - must be in argument position
-  - therefore checkable, not synthesizable
-  - when checking a hole agains a type, make fresh variable with that type
-  - instantiate dependent function with that variable
-  - when checking a term agains a hole, convertitability should produce a substitution
-  
-Solution: (Match should be annotated)
-  bottom up, collect uses and availability, derive latter from uses and context
-
+{- here we typecheck the abstract syntax tree (AST),
+   using a basic bidirectional checking algorithm,
+   also resolving variable names with type-driven name resolution
 -}
 
-type Uses = [[(Mult,Info)]]
+convertible :: Globals -> Context -> Loc -> Term -> Term -> Elab ()
+convertible glob ctx loc t0 t1 =
+  if Normalization.sub glob ctx False t0 t1
+  then pure ()
+  else TypeError (InconvertibleTypes loc ctx t0 t1)
 
-data ElabError
-  -- core
-  = CoreError C.Error
-  -- namespace errors
-  | NameAlreadyDefined QName Info
-  | NoSuitableDefinition Info
-  -- type errors
-  | ExpectedFunction Info Term
-  | UnexpectedFunction Info Term
-  | SynthHole Info
-  | SynthLambda Info
-  | UnboundVar Info
-  | InvalidType Term
-  -- multiplicity errors
-  | Unused Info -- linear variable is unused
-  | RelevantUse Info -- erased argument used once or unrestrictedly
-  | MultipleUse Info -- linear variable already used once
-  | UnrestrictedUse Info -- linear variable in unrestricted context
-  | MultiplicityMismatch Info Term
-
-data Result a
-  = Clear a
-  | TypeError ElabError
-  | Ambiguous Info [(QName, Result a)]
-
-instance Functor Result where
-  fmap f (TypeError err) = TypeError err
-  fmap f (Clear x) = Clear (f x)
-  fmap f (Ambiguous i xs) = Ambiguous i (fmap (\(n,x) -> (n,fmap f x)) xs)
-
-instance Applicative Result where
-  pure = Clear
-  
-  (TypeError err) <*> x = TypeError err
-  (Clear f) <*> x = fmap f x
-  (Ambiguous i fs) <*> x = Ambiguous i (fmap (\(n,f) -> (n, f <*> x)) fs)
-  
-instance Monad Result where
-  return = pure
-  
-  (TypeError err)  >>= f = TypeError err
-  (Clear x)        >>= f = f x
-  (Ambiguous i xs) >>= f = Ambiguous i (fmap (\(n,x) -> (n, x >>= f)) xs)
-
-compress :: Result a -> Result a
-compress (Ambiguous i xs) = let
-  xs' = Data.List.foldr (\(n,x) acc -> case compress x of
-    TypeError _ -> acc
-    x -> (n,x) : acc) [] xs
-  in case xs' of
-    []      -> TypeError (NoSuitableDefinition i)
-    [(_,x)] -> x
-    xs      -> Ambiguous i xs
-compress x = x
-
-compressM :: Result a -> (a -> Result b) -> Result b
-compressM (TypeError err)  f = TypeError err
-compressM (Clear x)        f = f x
-compressM (Ambiguous i xs) f = let
-  xs' = Data.List.foldr (\(n,x) acc -> case compressM x f of
-    TypeError _ -> acc
-    x -> (n,x) : acc) [] xs
-  in case xs' of
-    []      -> TypeError (NoSuitableDefinition i)
-    [(_,x)] -> x
-    xs      -> Ambiguous i xs
-    
-
-data ElabState = ElabState {
-  freshNames  :: Int,
-  freshVars   :: Int,
-  elabSymbols :: Map Name [(QName, C.Reference)],
-  fullSymbols :: Map QName (Info, C.Reference),
-  elabGlobals :: C.Globals}
-
-{-
-  how to elaborate while disambiguating:
-  1 do step 1
-  2 if 1 fails, fail
-  3 if step 1 produces singleton, continue as normal
-  4 if step 1 produces ambiguity, fold over candidates:
-    1 ok -> ok
-    2 typeError -> empty ambiguous
-    3 other error -> error
-
--}
-
-newtype Elab a = Elab (Context -> ElabState -> Either ElabError (ElabState, Result a))
-
-instance Functor Elab where
-  fmap f (Elab g) = Elab (\ctx st -> case g ctx st of
-    Left err -> Left err
-    Right (st',x) -> Right (st', fmap f x))
-
-instance Applicative Elab where
-  pure x = Elab (\ctx st -> Right (st, Clear x))
-  (Elab f) <*> (Elab g) = Elab (\ctx st -> case f ctx st of
-    Left err -> Left err
-    Right (st', f') -> case g ctx st' of
-      Left err -> Left err
-      Right (st'', g') -> Right (st'', f' <*> g'))
-
-instance Alternative Elab where
-  empty = undefined
-  (Elab f) <|> (Elab g) = Elab (\ctx st ->
-    case f ctx st of
-      Left _ -> g ctx st
-      x -> x)
-
-instance Monad Elab where
-  return = pure
-  
-  (Elab f) >>= g = Elab (\ctx st -> f ctx st >>= bar ctx) where
-    bar ctx (st,x) = case x of
-      TypeError err -> Right (st,TypeError err)
-      Clear x -> let (Elab g') = g x in g' ctx st
-      Ambiguous i xs -> do
-        (st,xs') <- (Data.List.foldr (\(n,x) acc -> do
-          (st,xs) <- acc
-          (st',x') <- bar ctx (st,x)
-          pure (st',(n,x'):xs)) (pure (st,[])) xs)
-        pure (st, Ambiguous i xs')
-
-{- PUT IN ENVIRONMENT -}
-
-{- some context operations
-  push/pop
-  multiply
-  redefine: variable eliminee's in case distinctions must reduce to their parameters
-uses operations
-  push/pop
-  update
-/context ops -}
-
-get :: Elab ElabState
-get = Elab (\ctx st -> Right (st, Clear st))
-
-put :: ElabState -> Elab ()
-put st = Elab (\ctx st -> Right (st, Clear ()))
-
-typeError :: ElabError -> Elab a
-typeError err = Elab (\ctx st -> Right (st, TypeError err))
-
-fatalError :: ElabError -> Elab a
-fatalError = Elab . const . const . Left
-
-lookup_ f qname =
-  maybe (error (show qname ++ "invalid context, name not found")) id .
-  Data.Map.lookup qname .
-  f <$> get
-  
-lookupName :: Name -> Elab [(QName,C.Reference)]
-lookupName = lookup_ elabSymbols
-
-lookupQName :: QName -> Elab (Info,C.Reference)
-lookupQName = lookup_ fullSymbols
-
-getInfo :: QName -> Elab Info
-getInfo = fmap fst . lookupQName
-
-getObject f i = do
-  obs <- f . elabGlobals <$> get
-  case lookup i obs of
-    Nothing -> error "invalid global environment, missing object"
-    Just item -> pure item
-
-getContext :: Elab Context
-getContext = Elab (\ctx st -> Right (st, Clear ctx))
-
-
-useSum :: [(Mult,Info)] -> Mult
-useSum = Data.List.foldr (plus . fst) Zero
-
-availability :: Context -> Uses -> Mult
-availability [] _ = Many
-availability (hyp:hyps) (use:uses) = multMin (availability hyps uses) (case (hypMult hyp, useSum use) of
-    (Zero,One)  -> Zero
-    (Zero,Many) -> Zero
-    (One,Many)  -> Zero 
-    (One, One)  -> One
-    _           -> Many)
-    
-
-freshId :: Elab Int
-freshId = do
-  st <- get
-  let i = freshNames st
-  put (st {freshNames = i + 1})
-  pure i
-
-ensureUndefined :: [String] -> Elab ()
-ensureUndefined qname = do
-  item <- Data.Map.lookup qname . fullSymbols <$> get
-  case item of
-    Nothing -> pure ()
-    Just (info,x) -> fatalError (NameAlreadyDefined qname info)
-
-addGlobal :: (C.Globals -> C.Globals) -> Elab ()
-addGlobal f = do
-  st <- get
-  put (st {elabGlobals = f (elabGlobals st)})
-
-addInductive :: Int -> C.Inductive -> Elab ()
-addInductive v x = addGlobal (\obs -> obs {globalInd = insert v x (globalInd obs)})
-
-addFixpoint :: Int -> C.Fixpoint -> Elab ()
-addFixpoint v x = addGlobal (\obs -> obs {globalFix = insert v x (globalFix obs)})
-
-addDefinition :: Int -> C.Definition -> Elab ()
-addDefinition v x = addGlobal (\obs -> obs {globalDef = insert v x (globalDef obs)})
-
-addDeclaration :: Int -> C.Declaration -> Elab ()
-addDeclaration v x = addGlobal (\obs -> obs {globalDecl = insert v x (globalDecl obs)})
-
-typeofRef :: C.Reference -> Elab Term
-typeofRef ref = case ref of
-  IndRef i     -> indSort <$> getObject globalInd i
-  FixRef i _ _ -> fixType <$> getObject globalFix i
-  ConRef i j   -> (\i -> introRules i !! j) <$> getObject globalInd i
-  DefRef i _   -> (\(ty,_,_) -> ty) <$> getObject globalDef i
-  DeclRef i    -> getObject globalDecl i
-
-convertible :: Term -> Term -> Elab ()
-convertible = undefined
-
-noUses :: Uses
-noUses = repeat []
-
-disambiguate :: Info -> Name -> Elab (Term,Term,Uses)
-disambiguate info name = do
-  item <- lookup name . elabSymbols <$> get
-  case item of
-    Nothing -> fatalError (UnboundVar info)
-    Just [] -> error "empty symbol table entry"
-    Just [(_,x)] -> do
-      ty <- typeofRef x
-      pure (C.Const info x,ty,noUses)
+-- look up a name in the symbol table and lookupConsant if appropriate
+lookupConstant :: GlobalState -> Loc -> Name -> Elab (Term,Term,Uses)
+lookupConstant glob loc name =
+  case lookup name (symbolTable glob) of
+    Nothing -> TypeError (UnboundVar loc)
+    Just [qname] -> case lookup qname (qsymbolTable glob) of
+      Nothing -> err (show loc ++ "object belonging to name not present: " ++ showQName qname)
+      Just (_,ref) -> pure (C.Const name ref, typeofRef (globalObjects glob) ref, noUses)
     Just xs -> do
-      xs' <- mapM (\(name,ref) -> do
-        ty <- typeofRef ref
-        pure (name, Clear (C.Const info ref,ty, noUses))) xs
-      Elab (\ctx st -> Right (st, Ambiguous info xs'))
-      
-useLocal :: Info -> Name -> Elab (Term,Term,Uses)
-useLocal info name = getContext >>= f 0 where
-  f n [] = fatalError (UnboundVar info)
+      mapM (\qname ->
+        case lookup qname (qsymbolTable glob) of
+          Nothing -> err (show loc ++ "name not present: " ++ showQName qname)
+          Just (_,ref) -> pure (qname, Clear (C.Const name ref,(typeofRef (globalObjects glob) ref), noUses))) xs >>=
+        Ambiguous name loc
+
+-- lookup a name in the context and return appropriate uses if present
+useLocal :: Context -> Loc -> Name -> Maybe (Term,Term,Uses)
+useLocal ctx loc name = f 0 ctx where
+  f n [] = Nothing
   f n (hyp:hyps)
-    | name == hypName hyp = pure (Var info n, hypType hyp, [(One,info)] : noUses)
-    | otherwise = do
-      (t,ty,uses) <- f (n + 1) hyps
-      pure (t, ty, [] : uses)
+    | name == hypName hyp = pure (Var n, lift (n + 1) (hypType hyp), (Oneuse One loc) : noUses)
+    | otherwise = fmap (\(t,ty,u) -> (t,ty,Nouse:u)) (f (n + 1) hyps)
 
+-- check if a term is a valid sort
+checkSort :: Globals -> Context -> Loc -> Term -> Elab ()
+checkSort glob ctx loc x = case whd glob ctx x of
+  Star -> pure ()
+  Box -> pure ()
+  _ -> err (show loc ++ "Invalid sort:\n" ++ showTerm ctx x)
 
-withContext :: (Context -> Context) -> Elab a -> Elab a
-withContext f (Elab g) = Elab (\ctx st -> g (f ctx) st)
-
-typeOf :: Term -> Elab Term
-typeOf (Var _ n) = fmap (\ctx -> hypType (ctx !! n)) getContext
-typeOf (App _ f a) = do
-    (Pi _ _ _ _ tb) <- typeOf f
-    pure (subst a tb)
-typeOf (Sort _ l) = pure (Sort Nothing (l + 1))
-typeOf (Pi _ m v ta tb) = do
-  ka <- typeOf ta
-  let hyp = Hypothesis {
-                hypType = ta,
-                hypMult = m,
-                hypName = v,
-                hypDef = Nothing}
-  kb <- withContext (hyp:)(typeOf tb)
-  case (ka,kb) of
-        (Sort _ n, Sort _ 0) -> pure (Sort Nothing 0)
-        (Sort _ n, Sort _ m) -> pure (Sort Nothing (max n m))  
-typeOf (Const _ ref)   = typeofRef ref >>= typeOf
-typeOf (Lam _ m v ta b) = let
-  hyp = Hypothesis {
-    hypType = ta,
-    hypMult = m,
-    hypName = v,
-    hypDef = Nothing}
-  in withContext (hyp:) (typeOf b)
-typeOf (Let _ m v ta a b) = let
-  hyp = Hypothesis {
-    hypType = ta,
-    hypMult = m,
-    hypName = v,
-    hypDef = Just a}
-  in withContext (hyp:) (typeOf b)
-typeOf (Case _ dat) = typeOf (App Nothing (motive dat) (eliminee dat))
-
-checkPi :: Term -> Term -> Elab Term
-checkPi ta tb = do
-    ka <- typeOf ta
-    kb <- typeOf tb
-    case (ka,kb) of
-        (Sort _ n, Sort _ 0) -> pure (Sort Nothing 0)
-        (Sort _ n, Sort _ m) -> pure (Sort Nothing (max n m))
-
-plusUses :: Uses -> Uses -> Uses
-plusUses = zipWith (++)
-
-timesUses :: Mult -> Uses -> Uses
-timesUses m xs = fmap (fmap (\(m',i) -> (times m m',i))) xs
-
-checkArgMult :: Info -> Mult -> [(Mult,Info)] -> Elab ()
+-- check variable usage against given multiplicity
+checkArgMult :: Loc -> Mult -> Use -> Elab ()
 checkArgMult _ Many _ = pure ()
-checkArgMult _ Zero uses = mapM_ f uses where
-    f (Zero,_) = pure ()
-    f (_,info) = typeError (RelevantUse info)
-checkArgMult info One uses = Data.List.foldr g (pure One) uses >>= h where
-    f (Zero,_) m = pure m
-    f (One,_) Zero = pure One
-    f (One,info) _ = typeError (MultipleUse info) 
-    f (Many,info) _ = typeError (UnrestrictedUse info)
+checkArgMult _ Zero uses = f uses where
+  f Nouse           = pure ()
+  f (Oneuse Zero _) = pure ()
+  f (Oneuse _ loc) = TypeError (RelevantUse loc)
+  f (CaseUse loc xs) = mapM_ f xs
+  f (Adduse x y) = f x *> f y
+checkArgMult loc One uses = checkOne uses where
 
-    g use acc = do
-        acc >>= f use
+  checkOne Nouse = TypeError (Unused loc)
+  checkOne (Oneuse Zero _) = TypeError (Unused loc)
+  checkOne (Oneuse One _) = pure ()
+  checkOne (Oneuse Many loc) = TypeError (UnrestrictedUse loc)
+  checkOne (Adduse x y) = do
+    m <- checkMaybe x
+    if m
+    then checkNone y
+    else checkOne y
+  checkOne (CaseUse loc' xs) = mapM_ checkOne xs
+  
+  checkNone Nouse = pure ()
+  checkNone (Oneuse Zero _) = pure ()
+  checkNone (Oneuse One loc) = TypeError (MultipleUse loc)
+  checkNone (Oneuse Many loc) = TypeError (UnrestrictedUse loc)
+  checkNone (Adduse x y) = checkNone x *> checkNone y
+  checkNone (CaseUse loc' xs) = mapM_ checkNone xs
+  
+  checkMaybe Nouse = pure False
+  checkMaybe (Oneuse Zero _) = pure False
+  checkMaybe (Oneuse One _) = pure True
+  checkMaybe (Oneuse Many loc) = TypeError (UnrestrictedUse loc)
+  checkMaybe (Adduse x y) = do
+    m <- checkMaybe x
+    if m
+    then checkNone y *> pure True
+    else checkMaybe y
+  checkMaybe (CaseUse loc' xs) = do
+    uses <- mapM checkMaybe xs
+    if and uses || not (or uses)
+    then pure (or uses)
+    else TypeError (IntersectUse loc')
 
-    h Zero = pure ()
-    h One  = typeError (Unused info)
+-- find the correct constructor ids for given names
+identifyBranch :: GlobalState -> Binder -> C.Reference -> Elab Int
+identifyBranch glob bind (ref @ (IndRef obj_id defno)) =
+  let name = binderName bind
+      loc  = binderLoc bind in
+    case Data.Map.lookup name (symbolTable glob) of
+      Nothing -> err (show (binderLoc bind) ++ "constructor name not found: " ++ name)
+      Just qnames -> let
+          refs = mapM (\qname -> case Data.Map.lookup qname (qsymbolTable glob) of
+            Nothing -> err (show loc ++ "name not present: " ++ showQName qname)
+            Just name -> pure name) qnames
 
-synth :: Expr -> Elab (Term,Term,Uses)
-synth expr = case expr of
-  EHole  info _ -> fatalError (SynthHole info)
-  EType  info level -> pure (Sort info level, Sort info (level + 1), noUses)
-  EVar   info name -> useLocal info name <|> disambiguate info name
-  EApply info f a -> do
-    (f,tf,uf) <- synth f
-    (info', m, ta, tb) <- (case tf of
-      Pi info m _ ta tb -> pure (info,m,ta,tb)
-      x -> typeError (ExpectedFunction info x))
-    (a,ua) <- check a ta
-    pure (App info f a, subst a tb, plusUses uf (timesUses m ua))
-  ELet info bind ta a b -> do
-    (a,ta,ua) <- (case ta of
-      Nothing -> synth a
-      Just ta -> do
-        (ta,_,_) <- synth ta
-        (a,ua) <- check a ta
-        pure (a,ta,ua))
-    ctx <- getContext
-    let heur = availability ctx ua
-        name = binderName bind
-        hyp = Hypothesis {
-          hypName = name,
-          hypMult = heur,
-          hypType = ta,
-          hypDef  = Just a}
-    (b,tb,(ux:ub)) <- withContext (hyp:) (synth b)
-    let u = case ux of
-            [] -> Zero
-            (u,_) : _ -> u
-    pure (Let info heur name ta a b, tb, plusUses (timesUses u ua) ub) 
-  ELambda info _ _ Nothing _ -> fatalError (SynthLambda info)
-  ELambda info m bind (Just ta) b -> do
-    (ta,ka,_) <- synth ta
+          g ((_,ConRef obj_id' defno' constrno _): _)
+            | obj_id == obj_id' && defno == defno' = pure constrno
+          g (_:xs) = g xs
+          g _ = TypeError (InvalidConstructor bind ref)
+        in refs >>= g
+
+-- check if every constructor of the inductive type is handled in a match expression
+-- needs update for default cases
+checkCovering :: Loc -> Int -> Int -> Int -> [Int] -> Elab ()
+checkCovering loc obj_id defno ctor_count = f 0 where
+  f n []
+    | n == ctor_count = pure ()
+  f n (m:ms)
+    | m == n = f (n + 1) ms
+  f n _ = TypeError (MissingCase loc (ConRef obj_id defno n undefined))
+
+checkBranch :: GlobalState -> Context -> Mult -> Term -> [Term] -> Int -> Int -> Int -> Int -> Term -> (Binder, [Binder], Expr) -> Elab (Term,Uses)
+checkBranch glob ctx mult motive params obj_id defno pno ctorno ctor_ty (bind,args,expr) = do
+  let
+    ctorname = binderName bind
+  
+    -- drop the first n domains of a nested pi-type, to instantiate it with the inductive parameters
+    drop_domains 0 tb = tb
+    drop_domains n (Pi _ _ _ tb) = drop_domains (n - 1) tb
+
+    -- specialize the type of the constructor with the inductive parameters
+    instantiated_ctor_ty = psubst (reverse params) (drop_domains (length params) ctor_ty)
+    
+    -- compute the types and multiplicities of the arguments of the specialized constructor
+    unroll (Pi m _ ta tb) (mults,tys) = unroll tb (times mult m : mults, ta : tys)
+    unroll tb acc = acc
+    
+    (mults,arg_tys) = unroll instantiated_ctor_ty mempty
+    
+    -- number of arguments in the AST
+    given_arity = length args
+    
+    -- source locations and names of arguments in the AST
+    (arg_locs,arg_names) = unzip (fmap (\b -> (binderLoc b, binderName b)) (reverse args))
+    
+    -- actual number of arguments of the constructor, modulo parameters
+    expected_arity = length arg_tys
+    
+    -- associate the names in the AST with the types of the arguments
+    update = zipWith (\name ty -> Hypothesis name ty Nothing) arg_names arg_tys
+    
+    ctx' = update ++ ctx
+    
+    count_down n
+      | n > 0 = Var (n - 1) : count_down (n - 1)
+      | otherwise = []
+      
+    -- constructor applied to the inductive parameters and the just now introduced arguments, needed to compute the return type
+    applied_ctor = App (Const ctorname (ConRef obj_id defno ctorno pno)) ((fmap (lift expected_arity) params) ++ count_down expected_arity)
+    
+    expected_branch_ty = App (lift expected_arity motive) [applied_ctor]
+  
+  if given_arity == expected_arity
+  then pure ()
+  else TypeError (ConstructorArity (binderLoc bind) (IndRef obj_id defno))
+  
+  (branch,uses) <- check glob ctx' expr expected_branch_ty
+  
+  let (arg_uses, uses') = Data.List.splitAt expected_arity uses
+  
+      abstract_branch = Data.List.foldl (\acc (m,n,t) -> Lam m n t acc)
+  
+  sequence_ (zipWith3 checkArgMult arg_locs mults arg_uses)
+  
+  pure (abstract_branch branch ((zip3 mults arg_names arg_tys)), uses')
+
+-- check a match expression with a given motive
+checkMatch :: GlobalState -> Context -> Loc -> Mult -> Expr -> Term -> [(Binder,[Binder],Expr)] -> Elab (Term,Term,Uses)
+checkMatch glob ctx loc mult scrutinee motive cases = do
+  (scrutinee',inty,uterm) <- synth glob ctx scrutinee
+  
+  case mult of
+    Zero -> if length cases > 1
+      then err (show loc ++ "\n erased match may have at most one branch")
+      else pure ()
+    _ -> pure ()
+  
+  let
+    getElimineeType :: Globals -> Context -> Loc -> Term -> Term -> Elab (Reference,[Term])
+    getElimineeType glob ctx loc e t = case whd glob ctx t of
+      App (Const _ (ref @ (IndRef _ _))) args -> pure (ref,args)
+      Const _ (ref @ (IndRef _ _ )) -> pure (ref,[])
+      _ -> err (show loc ++ showContext ctx ++ "\n expected a term of some inductive type, but the expression:\n" ++ showTerm ctx e ++ "\n is of type:\n" ++ showTerm ctx t) 
+
+  
+  -- get the inductive type reference and the parameters from the scrutinee
+  (indref,indparams) <- getElimineeType (globalObjects glob) ctx (exprLoc scrutinee) scrutinee' inty
+    
+  let -- number of parameters
+      pno = length indparams
+      
+      -- destruct reference,
+      IndRef obj_id defno = indref
+      
+      -- get definition
+      Just ind_block = Data.Map.lookup obj_id (globalInd (globalObjects glob))
+      inddef = ind_block !! defno
+      
+      -- get constructor types
+      ctor_types = introRules inddef
+  
+  -- from the obj_ids of the cases, find out which case belongs to which constructor
+  branch_ids <- mapM (\(x,_,_) -> identifyBranch glob x indref) cases
+  
+  -- sort the branches to match the order of declarations of the constructors
+  let tagged_branches = zip branch_ids cases
+      (sorted_ids,sorted_branches) = unzip (sortOn fst tagged_branches)
+  
+  -- check if each constructor is accounted for
+  checkCovering loc obj_id defno (length ctor_types) sorted_ids
+  
+  -- check the branches
+  bruses <- sequence (zipWith3 (checkBranch glob ctx mult motive indparams obj_id defno pno) [0..] ctor_types sorted_branches)
+  
+  let (branches,usess) = unzip bruses
+      uses = branchUses loc usess
+      result = CaseDistinction {
+        elimType = (obj_id,defno),
+        elimMult = mult,
+        eliminee = scrutinee',
+        motive = motive,
+        branches = branches}
+      result_type = App motive [scrutinee']
+  
+  pure (Case result, result_type, plusUses (timesUses mult uterm) uses)
+
+-- check or synthesise the binding of a let expression
+checkLetBinding :: GlobalState -> Context -> Binder -> Maybe Expr -> Expr -> Elab (Term,Term,Uses)
+checkLetBinding glob ctx bind Nothing a = synth glob ctx a
+checkLetBinding glob ctx bind (Just ta) a = do
+  let la = exprLoc ta
+  (ta,ka,_) <- synth glob ctx ta
+  checkSort (globalObjects glob) ctx la ka
+  (a,ua) <- check glob ctx a ta
+  pure (a,ta,ua)
+
+-- for the given expression, compute its corresponding core term, its type and the usage environment
+synth :: GlobalState -> Context -> Expr -> Elab (Term,Term,Uses)
+synth glob ctx expr = case expr of
+  EHole  loc _ -> err "Holes are not implemented"
+  EType  loc -> pure (Star, Box, noUses)
+  EVar   loc name -> maybe (lookupConstant glob loc name) pure (useLocal ctx loc name)
+  EApply loc f xs -> do
+    (f,tf,uf) <- synth glob ctx f
+    
+    (args,tapp,uargs) <- checkArgs tf xs
+    
+    pure (App f args, tapp, plusUses uf uargs) where
+    
+      checkArgs tf [] = pure ([],tf,noUses)
+      checkArgs tf (arg:args) = do
+        case whd (globalObjects glob) ctx tf of
+          Pi m _ ta tb -> do
+            (a,ua) <- check glob ctx arg ta
+            (args',tb',uargs) <- checkArgs (subst a tb) args
+            pure (a:args', tb', plusUses (timesUses m ua) uargs)
+          x -> err (
+                  show loc ++ "\n" ++
+                  showContext ctx ++ "\n" ++
+                  "application expected some function, but got:\n" ++
+                  showTerm ctx x ++ "\n")
+  ELet loc bind ta a b -> do
+    (a,ta,ua) <- checkLetBinding glob ctx bind ta a
     let name = binderName bind
-        info' = binderSpan bind
+        hyp = Hypothesis name ta (Just a)
+    (b,tb,ub0) <- synth glob (hyp : ctx) b
+    let ux : ub = ub0
+        u = useSum ux
+    -- substitute binder in return type?
+    pure (Let name ta a b, subst a tb, plusUses (timesUses u ua) ub)
+  ELambda loc _ _ Nothing _ -> err (show loc ++ showContext ctx ++ "\n\ncannot infer lambda")--TypeError (SynthLambda loc)
+  ELambda loc m bind (Just ta) b -> do
+    let la = exprLoc ta
+    (ta,ka,_) <- synth glob ctx ta
+    checkSort (globalObjects glob) ctx la ka
+    let name = binderName bind
+        loc' = binderLoc bind
         hyp = Hypothesis {
           hypName = name,
-          hypMult = m,
           hypType = ta,
           hypDef  = Nothing}
-    (b,tb,(ux:ub)) <- withContext (hyp:) (synth b)
-    checkPi ta tb
-    checkArgMult info' m ux
-    pure (Lam info m name ta b, Pi Nothing m name ta tb, ub)
-  EPi info m bind ta tb -> do
-    (ta,_,ua) <- synth ta
-    (tb,kb,ub) <- synth tb
-    checkPi ta tb
+    (b,tb,ub0) <- synth glob (hyp : ctx) b
+    let ux : ub = ub0
+    checkArgMult loc' m ux
+    pure (Lam m name ta b, Pi m name ta tb, ub)
+  EPi loc m bind ta tb -> do
+    let la = exprLoc ta
+        lb = exprLoc tb
+    (ta,ka,_) <- synth glob ctx ta
     let name = maybe "" binderName bind
-    pure (Pi info m name ta tb, kb, plusUses ua ub) -- make uses relevant
-  EMatch info term cases -> undefined-- assume non-dependent return type
-  ELetRec info funs a -> undefined -- hard
+        hyp = Hypothesis {
+          hypName = name,
+          hypType = ta,
+          hypDef  = Nothing}
+    (tb,kb,_) <- synth glob (hyp : ctx) tb
+    checkSort (globalObjects glob) ctx la ka
+    checkSort (globalObjects glob) ctx lb kb
+    let name = maybe "" binderName bind
+    pure (Pi m name ta tb, kb, noUses)
+  EMatch loc mult term motive cases -> do
+    motive <- (case motive of
+      Nothing -> TypeError (SynthMatch loc)
+      Just motive -> pure motive)
+    
+    let motive_loc = exprLoc motive
+ 
+    (motive',moty,_) <- synth glob ctx motive
+    (_, ta, _) <- synth glob ctx term
+    
+    case whd (globalObjects glob) ctx moty of
+      Pi m _ ta' tb -> do
+        convertible (globalObjects glob) ctx motive_loc ta ta'
+        checkSort (globalObjects glob) ctx motive_loc (typeOf (globalObjects glob) ctx tb)
+      x -> err (
+              show loc ++ "\n" ++
+              showContext ctx ++ "\n" ++
+              "motive expected some function, but got:\n" ++
+              showTerm ctx x ++ "\n")
+  
+    checkMatch glob ctx loc mult term motive' cases
+  ELetRec loc funs a -> do
+    err "nested let-recs are not implemented"
 
-
-subst :: Term -> Term -> Term
-subst = undefined
-
-check :: Expr -> Term -> Elab (Term,Uses)
-check (ELambda info m bind Nothing b) ty = do
-    (m', ta, tb) <- (case ty of
-        Pi _ m' _ ta tb -> pure (m', ta, tb)
-        x -> typeError (UnexpectedFunction info x))
-    if m == m' then pure () else typeError (MultiplicityMismatch info ty)
+-- check an expression agains a given type and compute the corresponding core term
+check :: GlobalState -> Context -> Expr -> Term -> Elab (Term,Uses)
+check glob ctx expr ty = case expr of
+  ELambda loc _ bind Nothing b -> do
+    (m, ta, tb) <- (case whd (globalObjects glob) ctx ty of
+        Pi m _ ta tb -> pure (m, ta, tb)
+        x -> -- TypeError (ExpectedFunction loc x))
+            err (
+              show loc ++ "\n" ++
+              showContext ctx ++ "\n" ++
+              "(Lam-0) expected some function, but got:\n" ++
+              showTerm ctx x ++ "\n"))
     let name = binderName bind
+        loc' = binderLoc bind
         hyp = Hypothesis {
             hypName = name,
-            hypMult = m,
             hypType = ta,
             hypDef  = Nothing}
-    withContext (hyp:) 
-    undefined
-check a ta = do
-    (a,ta',ua) <- synth a
-    convertible ta ta'
-    pure (a,ua)
-  -- lambda un-annotated
-  -- case : check if scrutinee is rel, transform return type
- 
-
-
-
-{-
-  consider nested fixpoints as well
-elabFixpoint :: [Function] -> Elab ()
-elabFixpoint funs = do
-  let (infos, binders, tys, bodies) = unzip4 funs
-      
-      names = binderName <$> binders
-      
-  mapM_ ensureUndefined ((:[]) <$> names)
-  
-  tys' <- mapM (fmap fst . synth) tys
-  
-  let makeContext name ty = (Many, name, ty, Nothing)
-      
-      context = zipWith makeContext names tys'
-
-  bodies' <- withContext (const context) (mapM (uncurry check) (zip bodies tys'))
-  
-  id <- freshId
-  
-  undefined
-  {- 
-    non-mutual induction/recursion by eliminators is now officially a thing:
-    - take mutually recursive definitions apart
-    - find recursive parameter and compute IH
-    - lift out calls nested in case expressions
-    - translate matches to eliminators
+    (b,ub0) <- check glob (hyp : ctx) b tb
+    let ux : ub = ub0
+    checkArgMult loc' m ux
+    pure (Lam m name ta b, ub)
+  ELambda loc _ bind (Just ta) b -> do
+    (ta,_,_) <- synth glob ctx ta
+    let ty' = whd (globalObjects glob) ctx ty
+    (m, ta', tb) <- (case ty' of
+        Pi m _ ta tb -> pure (m, ta, tb)
+        x -> -- TypeError (ExpectedFunction loc x))
+            err (
+              show loc ++
+              showContext ctx ++ "\n" ++
+              "(@Lam) expected some function, but got:\n" ++
+              showTerm ctx ty ++ "\n" ++
+              showTerm ctx ty' ++ "\n"))
+    let name = binderName bind
+        loc' = binderLoc bind
+        hyp = Hypothesis {
+            hypName = name,
+            hypType = ta,
+            hypDef  = Nothing}
     
-    on eliminators:
-    - account for sorts
-    - account for multiplicity
-      - ensure at most one (valid) case for erased arguments
-        - count cases
-      - ensure linear functions don't use both subdata and IH
-        - keep tags on subdata for elimination expression
-  
-  termination check
-    goal: find recursive parameters for each function
-    traverse bodies
-    annotate context variables:
-      number of direct parameter,
-      number of substructures
-    analyse calls to fp:
-      first order:
-        find indices of smaller parameters
-      second order:  
-  -}
+    if Normalization.sub (globalObjects glob) ctx False ta' ta
+    then pure ()
+    else
+      err (show loc ++ "\n" ++
+        "in context:\n" ++
+        showContext ctx ++ "\n" ++
+        "The argument is expected to have type:\n" ++
+        showTerm ctx ty ++ "\n" ++
+        "but has been given type:\n" ++
+        showTerm ctx ta)
+    
+    (b,ub0) <- check glob (hyp : ctx) b tb
+    
+    (ux,ub) <- (case ub0 of
+      (ux:ub) -> pure (ux,ub)
+      _ -> err (show loc ++ showContext ctx ++ "\nempty usage list should be infinite"))    
+    
+    let ux : ub = ub0
+    checkArgMult loc' m ux
+    pure (Lam m name ta b, ub)
+  ELet loc bind ta a b -> do
+    (a,ta,ua) <- checkLetBinding glob ctx bind ta a
+    let name = binderName bind
+        hyp = Hypothesis name ta (Just a)
+    (b,ub0) <- check glob (hyp : ctx) b (lift 1 ty)
+    let ux : ub = ub0
+        u = useSum ux
+    pure (Let name ta a b, plusUses (timesUses u ua) ub)
+  EMatch loc mult scrutinee Nothing branches -> do
+    (_,ta,_) <- synth glob ctx scrutinee
+    (t,_,u) <- checkMatch glob ctx loc mult scrutinee (Lam Many "" ta (lift 1 ty)) branches
+    pure (t,u)
+  x -> do
+    (a,ta,ua) <- synth glob ctx x
+    
+    let ty' = whd (globalObjects glob) ctx ty
+        ta' = whd (globalObjects glob) ctx ta
+    
+    if Normalization.sub (globalObjects glob) ctx False ta ty
+    then pure ()
+    else
+      err (show (exprLoc x) ++ "\n" ++
+        "in context:\n" ++
+        showContext ctx ++ "\n" ++
+        "expected type:\n" ++
+        showTerm ctx ty' ++ "\n" ++
+        "but expression:\n" ++
+        showTerm ctx a ++ "\n" ++
+        "has type:\n" ++
+        showTerm ctx ta')
+    
+    pure (a,ua)
 
-elabConstant :: Info -> Binder -> Maybe Expr -> Expr -> Elab()
-elabConstant span bind ty body = do
-  let name = [binderName bind]
-  ensureUndefined name
-  (body',ty') <- (case ty of
-    Nothing -> synth body
-    Just ty -> do
-      (ty',_) <- synth ty
-      body' <- check body ty'
-      pure (body', ty'))
-  id <- freshId
-  insertDefinition id (C.Constant span ty' body')
-
-
-elabPostulate :: Info -> Binder -> Expr -> Elab ()
-elabPostulate span bind ty = do
-  let name = [binderName bind]
-  ensureUndefined name
-  (ty',_) <- synth ty
-  id <- freshId
-  insertPostulate id (C.Postulate span ty')
-
-elabModule :: Module -> Elab ()
-elabModule = mapM_ elabDecl where
-
-  elabDecl :: Decl -> Elab ()
-  elabDecl (Inductive types)            = elabInductive types
-  elabDecl (Fixpoint funs)              = elabFixpoint funs
-  elabDecl (Constant span name ty body) = elabConstant span name ty body
-  elabDecl (Postulate span name ty)     = elabPostulate span name ty
--}

@@ -13,7 +13,7 @@ puncts = [
   "["  , "]", "{", "}", "_",
   "<"  ,  ">" , "!" , ";" , "\\" ,  ".", ":", ","]
 
-keywords = ["let", "rec", "in", "type", "and", "match", "with", "fun", "Pi", "Sigma", "Type", "int", "val"]
+keywords = ["let", "rec", "in", "type", "and", "match", "match0", "match1", "return", "with", "fun", "Pi", "Type", "int", "val"]
 
 data Cursor = Cursor {
   cursorIndex :: Int,
@@ -28,7 +28,9 @@ data Token
   | Str    [Int]
   deriving (Eq)
 
-data Span = Span {
+data Loc = Loc {
+  fileName  :: String,
+  charray   :: Charray,
   lineBegin :: Int,
   startLine :: Int,
   startCol  :: Int,
@@ -75,46 +77,51 @@ instance Monad Parser where
 len :: Charray -> Int
 len = (+1) . snd . bounds
 
-showSpan :: String -> Charray -> Span -> String
-showSpan src arr (Span {
-  lineBegin = lineBegin,
-  startCol  = startCol,
-  startLine = startLine,
-  endCol    = endCol,
-  endLine   = endLine}) =
-  let
-    break i = if i >= len arr then ("",i) else
-              let x = arr ! i in
-              if x == '\n' then ("",i+1) else
-              let (xs,j) = break (i + 1) in (x:xs,j)
+instance Show Loc where
+  show (Loc {
+    fileName  = src,
+    charray   = arr,
+    lineBegin = lineBegin,
+    startCol  = startCol,
+    startLine = startLine,
+    endCol    = endCol,
+    endLine   = endLine}) =
+    let
+      break i = if i >= len arr then ("",i) else
+                let x = arr ! i in
+                if x == '\n' then ("",i+1) else
+                let (xs,j) = break (i + 1) in (x:xs,j)
 
-    eatLines n i = if n <= 0 then "" else let
-      (first,rest) = break i
-      in first ++ "\n" ++ eatLines (n - 1) rest
+      eatLines n i = if n <= 0 then "" else let
+        (first,rest) = break i
+        in first ++ "\n" ++ eatLines (n - 1) rest
 
-    (first,rest) = break lineBegin
-    
-    header = src ++ ":" ++ show startLine ++ ":" ++ show startCol ++ ":\n"
-    underline = replicate startCol '_' ++ replicate (endCol - startCol) '^' ++ "\n"
-    upline = replicate startCol '_' ++ "^\n"
-    downline = replicate endCol   '_' ++ "^\n"
-    middle = eatLines (endLine - startLine) rest
-    multiline =  upline ++ middle ++ downline
-  in header ++ first ++ "\n" ++ (if startLine == endLine then underline else multiline)
+      (first,rest) = break lineBegin
+      
+      header = src ++ ":" ++ show startLine ++ ":" ++ show startCol ++ ":\n"
+      underline = replicate startCol ' ' ++ replicate (endCol - startCol) '^' ++ "\n"
+      upline = replicate startCol '_' ++ "^\n"
+      downline = replicate endCol   '_' ++ "^\n"
+      middle = eatLines (endLine - startLine) rest
+      multiline =  upline ++ middle ++ downline
+    in header ++ first ++ "\n" ++ (if startLine == endLine then underline else multiline)
 
-makeSpan x y = Span {
+makeLoc :: Cursor -> Cursor -> Parser Loc
+makeLoc x y = Parser (\src arr c -> Right (Loc {
+  fileName  = src,
+  charray   = arr,
   lineBegin = cursorBegin x,
   startCol  = col x,
   startLine = line x,
   endCol    = col y,
-  endLine   = line y}
+  endLine   = line y}, c))
 
-err :: Span -> String -> String -> Parser a
-err span msg e = Parser $ \src arr c -> Left $
-  showSpan src arr span ++ "\nexpected " ++ msg ++ ", but got: \'" ++ e ++ "\'"
+err :: Loc -> String -> String -> Parser a
+err span msg e = Parser $ \_ _ c -> Left $
+  show span ++ "\nexpected " ++ msg ++ ", but got: \'" ++ e ++ "\'"
 
-err2 span msg = Parser $ \src arr c -> Left $
-  showSpan src arr span ++ msg
+err2 span msg = Parser $ \_ _ c -> Left $
+  show span ++ msg
 
 eof :: Parser Token
 eof = Parser $ \src arr c ->
@@ -137,7 +144,7 @@ char = Parser $ \src arr c ->
           line        = line c + 1}
         else Cursor {
           cursorIndex = cursorIndex c + 1,
-          cursorBegin = cursorIndex c + 1,
+          cursorBegin = cursorBegin c,
           col         = col c + 1,
           line        = line c}
     in pure (x,c')
@@ -153,13 +160,14 @@ parseIf f = do
   guard (f x)
   pure x
   
-spanned :: Parser a -> Parser (Span,a)
+spanned :: Parser a -> Parser (Loc,a)
 spanned p = do
   ws
   begin <- getCursor
   item  <- p
   end   <- getCursor
-  pure (makeSpan begin end, item)
+  span  <- makeLoc begin end
+  pure (span, item)
 
 string :: String -> Parser String
 string = sequence . map (parseIf . (==))

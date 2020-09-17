@@ -3,7 +3,14 @@ module Iterator where
 import Core
 import Data.List
 
-{- based on the matita kernel -}
+{- based on the matita ctxernel -}
+{- here we have utilities for iterating over core terms -}
+
+nth :: Int -> [a] -> Maybe a
+nth 0 (x : _) = Just x
+nth n (_ : xs) = nth (n-1) xs
+nth _ _ = Nothing
+
 
 {-
 fold visits the term t accumulating in
@@ -12,37 +19,29 @@ acc the result of the applications of
 
 f to subterms;
 
-k is an input parameter for f and should be understood as the information required by f in order
+ctx is an input parameter for f and should be understood as the information required by f in order
 to correctly process a subterm.
 This information may (typically) change when passing binders, and in this case
 
-g is in charge to update k
+g is in charge to update ctx
 -}
-
 fold :: (Hypothesis -> k -> k) -> k -> (k -> Term -> a -> a) -> Term -> a -> a
-fold g k f t acc = case t of
-  App _ fun arg -> f k fun (f k arg acc)
-  Pi  _ mult name src dst -> f k src (f (g (mult, name, src, Nothing) k) dst acc)
-  Lam _ mult name src dst -> f k src (f (g (mult, name, src, Nothing) k) dst acc)
-  Let _ mult name ty t body -> f k ty (f k t (f (g (mult, name, ty, Just t) k) body acc))
-  Match _ _ ty t arms -> foldr (f k) (f k t (f k ty acc)) arms
+fold push ctx f t acc = case t of
+  App fun args -> f ctx fun (foldr (f ctx) acc args)
+  Pi  mult name src dst -> f ctx src (f (push (Hypothesis name src Nothing) ctx) dst acc)
+  Lam mult name src dst -> f ctx src (f (push (Hypothesis name src Nothing) ctx) dst acc)
+  Let name ty t body -> f ctx ty (f ctx t (f (push (Hypothesis name ty (Just t)) ctx) body acc))
+  Case dat -> foldr (f ctx) (f ctx (motive dat) (f ctx (eliminee dat) acc)) (branches dat)
   _ -> acc
-
-{-
-fold2 :: (Hypothesis -> k -> k) -> k -> (k -> a -> Term -> a) -> a -> Term -> a
-fold2 g k f acc t = case t of
-  App _ fun arg -> f k (f k acc fun) arg
-  Pi  _ mult name src dst -> f (g (mult, name, src, Nothing) k) (f k acc src) dst
-  Lam _ mult name src body -> f (g (mult, name, src, Nothing) k) (f k acc src) body
-  Let _ mult name ty t body -> f (g (mult, name, ty, Just t) k) (f k (f k acc ty) t) body
-  Match _ _ ty scrutinee arms -> foldl' (f k) (f k (f k acc ty) scrutinee) arms
-  _ -> acc
--}
 
 map :: (Hypothesis -> k -> k) -> k -> (k -> Term -> Term) -> Term -> Term
-map g k f t = case t of
-  App info fun arg -> App info (f k fun) (f k arg)
-  Pi  info mult name src dst -> Pi info mult name (f k src) (f (g (mult, name, src, Nothing) k) dst)
-  Lam info mult name src dst -> Lam info mult name (f k src) (f (g (mult, name, src, Nothing) k) dst)
-  Let info mult name ty t body -> Let info mult name (f k ty) (f k t) (f (g (mult, name, ty, Just t) k) body)
-  Match info ref ty scrutinee arms -> Match info ref (f k ty) (f k scrutinee) (fmap (f k) arms)
+map push ctx f t = case t of
+  App fun args -> App (f ctx fun) (fmap (f ctx) args)
+  Pi  mult name src dst -> Pi mult name (f ctx src) (f (push (Hypothesis name src Nothing) ctx) dst)
+  Lam mult name src dst -> Lam mult name (f ctx src) (f (push (Hypothesis name src Nothing) ctx) dst)
+  Let name ty t body -> Let name (f ctx ty) (f ctx t) (f (push (Hypothesis name ty (Just t)) ctx) body)
+  Case dat -> Case (dat {
+      eliminee = f ctx (eliminee dat),
+      motive   = f ctx (motive dat),
+      branches = fmap (f ctx) (branches dat)})
+  t -> t

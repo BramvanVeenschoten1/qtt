@@ -5,12 +5,12 @@ import Control.Applicative
 import Data.List
 import Data.Function
 import Data.Array.Unboxed
-import Multiplicity
+import Core(Mult(..))
   
 type Name = String
 type QName = [String]
 
-data Binder = Binder {binderSpan :: Maybe Span, binderName :: Name}
+data Binder = Binder {binderLoc :: Loc, binderName :: Name}
 
 instance Eq Binder where
   (==) = on (==) binderName
@@ -23,82 +23,64 @@ instance Show Binder where
 
 type Param = (Mult,Binder, Maybe Expr)
 
-type CParam = (Mult, Maybe Binder, Expr)
+type Ctor = (Binder, Expr)
 
-type Ctor = (Binder, [CParam])
+type Inductive = (Loc, Binder, [Param], [Ctor])
 
-type Inductive = (Info, Binder, [Param], [Ctor])
-
-type Function = (Info, Binder, Expr, Expr)
-
-type Info = Maybe Span
+type Function = (Loc, Binder, Expr, Expr)
 
 type Module = [Decl]
 
 data Decl 
   = Inductive [Inductive]
   | Fixpoint [Function]
-  | Constant Info Binder (Maybe Expr) Expr
-  | Postulate Info Binder Expr
+  | Constant Loc Binder (Maybe Expr) Expr
+  | Postulate Loc Binder Expr
 
 data Expr 
-  = EHole   Info Int
-  | EType   Info Int
-  | EVar    Info Name
-  | EApply  Info Expr Expr
-  | ELet    Info Binder (Maybe Expr) Expr Expr
-  | ELambda Info Mult Binder (Maybe Expr) Expr
-  | EPi     Info Mult (Maybe Binder) Expr Expr
-  | ELetRec Info [Function] Expr
-  | EMatch  Info Expr [(Binder,[Binder],Expr)]
- 
-showCases = foldr (\(ctor,args,expr) -> (++) (" | " ++ show ctor ++ " " ++ show args ++ " -> " ++ show expr)) ""
-showAnnot = maybe "" ((++) " : " . show)
-showBindings = foldr (\(_,v,ta,a) -> (++) (show v ++ " : " ++ show ta ++ " = " ++ show a ++ "; ")) ""
-
-instance Show Expr where
-  show (EHole _ x)              = "_"
-  show (EType _ _)              = "Type"
-  show (EVar _ x)               = x
-  show (EApply _ l r)           = "(" ++ show l ++ " " ++ show r ++ ")"
-  show (ELet _ v ta a b)        = "let " ++ show v ++ showAnnot ta ++ " = " ++ show a ++ " in " ++ show b
-  show (ELambda _ m v ta b)     = "fun" ++ show m ++ " " ++ show v ++ showAnnot ta ++ " -> " ++ show b ++ "]"
-  show (EPi _ m (Just v) ta tb) = "Pi " ++ show m ++ " " ++ show v ++ " : " ++ show ta ++ ", " ++ show tb
-  show (EPi _ m Nothing ta tb)  = "(" ++ show ta ++ showArrow m ++ show tb ++ ")"    
-  show (ELetRec _ b e)          = "let rec " ++ showBindings b ++ " in " ++ show e
-  show (EMatch _ s cases)       = "match " ++ show s ++ " with" ++ showCases cases
+  = EHole   Loc Int
+  | EType   Loc
+  | EVar    Loc Name
+  | EApply  Loc Expr [Expr]
+  | ELet    Loc Binder (Maybe Expr) Expr Expr
+  | ELambda Loc Mult Binder (Maybe Expr) Expr
+  | EPi     Loc Mult (Maybe Binder) Expr Expr
+  | ELetRec Loc [Function] Expr
+  | EMatch  Loc Mult Expr (Maybe Expr) [(Binder,[Binder],Expr)]
 
 showArrow Zero = " => "
 showArrow One  = " -o "
 showArrow Many = " -> "
 
-exprInfo (EType s _) = s
-exprInfo (EHole s _) = s
-exprInfo (EVar s _) = s
-exprInfo (EApply s _ _) = s
-exprInfo (ELambda s _ _ _ _) = s
-exprInfo (ELet s _ _ _ _) = s
-exprInfo (EPi s _ _ _ _) = s
-exprInfo (ELetRec s _ _) = s
-exprInfo (EMatch s _ _) = s
+exprLoc (EType s) = s
+exprLoc (EHole s _) = s
+exprLoc (EVar s _) = s
+exprLoc (EApply s _ _) = s
+exprLoc (ELambda s _ _ _ _) = s
+exprLoc (ELet s _ _ _ _) = s
+exprLoc (EPi s _ _ _ _) = s
+exprLoc (ELetRec s _ _) = s
+exprLoc (EMatch s _ _ _ _) = s
 
-mkBinder :: (Span,String) -> Binder
-mkBinder (s,xs) = Binder (Just s) xs
+mkBinder :: (Loc,String) -> Binder
+mkBinder = uncurry Binder
 
 primary = do
   ws
   begin <- getCursor
   (span, t) <- spanned token
-  let s = Just span
   case t of
-    Symbol x    -> pure (EVar s x)
-    Pct "_"     -> pure (EHole s undefined)
-    Pct "Type"  -> pure (EType s 0)
-    Pct "Pi"    -> quant begin
-    Pct "match" -> match begin
-    Pct "fun"   -> lam begin
-    Pct "("     -> expr <* expect ")" "closing ')' after expression"
-    x           -> err span "some expression" (show x)
+    Symbol x     -> pure (EVar span x)
+    Pct "_"      -> pure (EHole span undefined)
+    Pct "Type"   -> pure (EType span)
+    Pct "Pi"     -> quant begin
+    Pct "match0" -> match Zero begin
+    Pct "match1" -> match One  begin
+    Pct "match"  -> match Many begin
+    Pct "fun"    -> lam begin
+    Pct "let"    -> lett begin
+    Pct "("      -> expr <* expect ")" "closing ')' after expression"
+    x            -> err span "some expression" (show x)
 
 mult :: Parser Mult
 mult = do
@@ -142,7 +124,8 @@ lam begin = do
   expect "->" "'->' after params in lambda expression"
   body <- expr
   end <- getCursor
-  let f (m,v,ta) = ELambda (Just (makeSpan begin end)) m v ta
+  span <- makeLoc begin end
+  let f (m,v,ta) = ELambda span m v ta
   pure (foldr f body ps)
 
 quant :: Cursor -> Parser Expr
@@ -154,7 +137,8 @@ quant begin = do
   expect "," "',' after binder in dependent product type"
   tb <- expr
   end <- getCursor
-  pure (EPi (Just (makeSpan begin end)) m (Just v) ta tb)
+  span <- makeLoc begin end
+  pure (EPi span m (Just v) ta tb)
 
 pattern :: Parser (Binder,[Binder])
 pattern = (,) <$> ctor <*> many args where
@@ -166,13 +150,18 @@ pattern = (,) <$> ctor <*> many args where
       Symbol x -> pure (mkBinder (span, x))
       x -> err span "some variable or wildcard" (show x)
 
-match :: Cursor -> Parser Expr
-match begin = do
+match :: Mult -> Cursor -> Parser Expr
+match m begin = do
   scrutinee <- expr
+  t <- peek token
+  motive <- (case t of
+    Pct "return" -> token *> fmap Just expr
+    _ -> pure Nothing)
   expect "with" "'with' after scrutinee in match-expression"
   a <- arms
   end <- getCursor
-  pure (EMatch (Just (makeSpan begin end)) scrutinee a)
+  span <- makeLoc begin end
+  pure (EMatch span m scrutinee motive a)
   where
     arms = do
       t <- peek token
@@ -187,23 +176,31 @@ match begin = do
       pure ((ctor,args,e):xs)
 
 app :: Parser Expr
-app = g <$> (ws *> getCursor) <*> primary <*> args where
+app = do
+  ws
+  begin <- getCursor
+  prim <- primary
+  borgs <- args
+  end <- getCursor
+  span <- makeLoc begin end
+  if Prelude.null borgs
+  then pure prim
+  else pure (EApply span prim borgs)
+  where
   args = do
     t <- peek token
     case t of
-      Symbol _    -> f
-      Pct "Pi"    -> f
-      Pct "fun"   -> f
-      Pct "match" -> f
-      Pct "_"     -> f
-      Pct "("     -> f
-      _           -> pure []
+      Symbol _     -> f
+      Pct "Pi"     -> f
+      Pct "fun"    -> f
+      Pct "match"  -> f
+      Pct "match0" -> f
+      Pct "match1" -> f
+      Pct "_"      -> f
+      Pct "("      -> f
+      _            -> pure []
 
-  f :: Parser [(Expr,Cursor)]
-  f = (:) <$> ((,) <$> primary <*> getCursor) <*> args
-
-  g _ x [] = x
-  g begin x ((y,end):ys) = g begin (EApply (Just (makeSpan begin end)) x y) ys
+  f = (:) <$> primary <*> args
 
 lett :: Cursor -> Parser Expr
 lett begin = do
@@ -215,10 +212,12 @@ lett begin = do
 unfoldParams :: [Param] -> (Maybe Expr, Expr) -> (Maybe Expr, Expr)
 unfoldParams [] x = x
 unfoldParams ((m, v, t) : ps) x = let
+  span = exprLoc (snd x)
+
   (ty', body') = unfoldParams ps x
   
-  ty'' = EPi Nothing m (Just v) <$> t <*> ty'
-  body'' = ELambda Nothing m v t body'
+  ty'' = EPi span m (Just v) <$> t <*> ty'
+  body'' = ELambda span m v t body'
   in (ty'', body'')
 
 letBinding :: Parser (Binder, Maybe Expr, Expr)
@@ -242,7 +241,8 @@ nonrec begin = do
   expect "in" "'in' after binding in let-expression"
   e <- expr
   end <- getCursor
-  pure (ELet (Just (makeSpan begin end)) v t b e)
+  span <- makeLoc begin end
+  pure (ELet span v t b e)
 
 letrec :: Cursor -> Parser Expr
 letrec begin = do
@@ -250,7 +250,8 @@ letrec begin = do
   expect "in" "'in' after bindings in let rec expresssion"
   e <- expr
   end <- getCursor
-  pure (ELetRec (Just (makeSpan begin end)) funs e)
+  span <- makeLoc begin end
+  pure (ELetRec span funs e)
 
 arrow :: Parser Expr
 arrow = do
@@ -268,7 +269,8 @@ arrow = do
         token
         rhs <- arrow
         end <- getCursor
-        return (EPi (Just (makeSpan begin end)) m Nothing lhs rhs)
+        span <- makeLoc begin end
+        return (EPi span m Nothing lhs rhs)
 
 expr :: Parser Expr
 expr = arrow
@@ -279,7 +281,7 @@ bindings = do
   t' <- (case t of
     Nothing -> err2 span "recursive bindings must have type annotations"
     Just t -> pure t)
-  let bind = (Just span, v, t', b) 
+  let bind = (span, v, t', b) 
   t <- peek token
   case t of
     Pct "and" -> (:) bind <$> (token *> bindings)
@@ -294,7 +296,8 @@ nonRecDecl :: Cursor -> Parser Decl
 nonRecDecl begin = do
   (v,t,b) <- letBinding
   end <- getCursor
-  pure (Constant (Just (makeSpan begin end)) v t b)
+  span <- makeLoc begin end
+  pure (Constant span v t b)
 
 decl :: Cursor -> Parser Decl
 decl begin = do
@@ -303,36 +306,6 @@ decl begin = do
     Pct "rec" -> token *> recDecl
     _ -> nonRecDecl begin
 
-ctorParam :: Parser CParam
-ctorParam = f <|> g <|> h where
-  f = do
-    (span,v) <- spanned (expectSymbol "")
-    pure (Many, Nothing, EVar (Just span) v)
-  g = do
-    expect "(" ""
-    m <- mult
-    v <- mkBinder <$> spanned (expectSymbol "")
-    expect ":" ""
-    e <- expr
-    expect ")" ""
-    pure (m,Just v, e)
-  h = do
-    expect "(" ""
-    m <- mult
-    e <- expr
-    expect ")" "closing ')' after parameter"
-    pure (m,Nothing,e)
-
-ctorParams :: Parser [CParam]
-ctorParams = do
-  t <- peek token
-  case t of
-    Pct "(" -> someParams
-    Symbol _ -> someParams
-    _ -> pure []
-    where
-      someParams = (:) <$> ctorParam <*> ctorParams
-
 constructors :: Parser [Ctor]
 constructors = do
   t <- peek token
@@ -340,24 +313,25 @@ constructors = do
     Pct "|" -> do
       token
       name <- mkBinder <$> spanned (expectSymbol "name in constructor definition")
-      ps <- ctorParams
+      expect ":" ": after name in constructor definition"
+      ty <- expr
       ctors <- constructors
-      pure ((name, ps) : ctors)
+      pure ((name, ty) : ctors)
     _ -> pure []
 
 inductive :: Cursor -> Parser [Inductive]
 inductive begin = do
   name <- mkBinder <$> spanned (expectSymbol "name in inductive definition")
   ps <- params
-  expect "=" "'=' after parameters in inductive definition"
   ctors <- constructors
   end <- getCursor
-  let res = (Just (makeSpan begin end), name, ps, ctors)
+  span <- makeLoc begin end
+  let res = (span, name, ps, ctors)
   ws
   begin <- getCursor
   t <- peek token
   case t of
-    Pct "and" -> (:) res <$> inductive begin
+    Pct "and" -> (:) res <$> (token *> inductive begin)
     _ -> pure [res]
 
 post :: Cursor -> Parser Decl
@@ -366,7 +340,8 @@ post begin = do
   expect ":" "':' after name in postulate"
   ty <- expr
   end <- getCursor
-  pure (Postulate (Just (makeSpan begin end)) name ty)
+  span <- makeLoc begin end
+  pure (Postulate span name ty)
 
 parseModule :: Parser Module
 parseModule = do
