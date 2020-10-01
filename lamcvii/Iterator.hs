@@ -3,7 +3,7 @@ module Iterator where
 import Core
 import Data.List
 
-{- based on the matita ctxernel -}
+{- based on the matita kernel -}
 {- here we have utilities for iterating over core terms -}
 
 nth :: Int -> [a] -> Maybe a

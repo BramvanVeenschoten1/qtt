@@ -5,8 +5,22 @@ import Control.Applicative
 import Data.List
 import Data.Function
 import Data.Array.Unboxed
+
+-- replace mult by Maybe Int or sumthin
 import Core(Mult(..))
-  
+
+{-
+TODO
+- add parameters for Pi
+- add annotations for arguments that are inferred, but relevant
+- adjust ast type for mult inference, and remove dependency on core
+- add equations
+- add destructuring let
+- add pattern-matching lambdas
+- add parametrized blocks
+-}
+
+
 type Name = String
 type QName = [String]
 
@@ -29,17 +43,17 @@ type Inductive = (Loc, Binder, [Param], [Ctor])
 
 type Function = (Loc, Binder, Expr, Expr)
 
-type Module = [Decl]
+type Module = (String,[String],[Decl])
 
 data Decl 
   = Inductive [Inductive]
-  | Fixpoint [Function]
-  | Constant Loc Binder (Maybe Expr) Expr
+  | Definition [Function]
   | Postulate Loc Binder Expr
 
 data Expr 
-  = EHole   Loc Int
+  = EHole   Loc
   | EType   Loc
+  | EName   Loc [String]
   | EVar    Loc Name
   | EApply  Loc Expr [Expr]
   | ELet    Loc Binder (Maybe Expr) Expr Expr
@@ -53,7 +67,8 @@ showArrow One  = " -o "
 showArrow Many = " -> "
 
 exprLoc (EType s) = s
-exprLoc (EHole s _) = s
+exprLoc (EHole s) = s
+exprLoc (EName s _) = s
 exprLoc (EVar s _) = s
 exprLoc (EApply s _ _) = s
 exprLoc (ELambda s _ _ _ _) = s
@@ -70,8 +85,8 @@ primary = do
   begin <- getCursor
   (span, t) <- spanned token
   case t of
-    Symbol x     -> pure (EVar span x)
-    Pct "_"      -> pure (EHole span undefined)
+    Symbol x     -> qname begin x
+    Pct "_"      -> pure (EHole span)
     Pct "Type"   -> pure (EType span)
     Pct "Pi"     -> quant begin
     Pct "match0" -> match Zero begin
@@ -82,6 +97,30 @@ primary = do
     Pct "("      -> expr <* expect ")" "closing ')' after expression"
     x            -> err span "some expression" (show x)
 
+qname :: Cursor -> String -> Parser Expr
+qname begin x = do
+  t <- peek token
+  case t of
+    Pct "." -> do
+      xs <- tail
+      end <- getCursor
+      span <- makeLoc begin end
+      pure (EName span (x:xs))
+    _ -> do
+      end <- getCursor
+      span <- makeLoc begin end
+      pure (EVar span x)
+  where
+    tail = do
+      token
+      x <- expectSymbol "symbol after '.' in qualified name"
+      t <- peek token
+      case t of
+        Pct "." -> do
+          xs <- tail
+          pure (x : xs)
+        _ -> pure [x]
+
 mult :: Parser Mult
 mult = do
   t <- peek token
@@ -90,22 +129,28 @@ mult = do
     Number 1 -> token *> pure One
     _        ->          pure Many
 
-param :: Parser Param
+annot :: Parser (Maybe Expr)
+annot = do
+  t <- peek token
+  case t of
+    Pct ":" -> token *> fmap Just expr
+    _ -> pure Nothing
+
+annotParam :: String -> Parser [Param]
+annotParam close = do
+  m <- mult
+  bs <- some (mkBinder <$> spanned (expectSymbol "name in parameter list"))
+  ty <- annot
+  expect close ("closing '" ++ close ++ "' after parameter")
+  pure (fmap (\b -> (m,b,ty)) bs)
+
+param :: Parser [Param]
 param = do
   (span,t) <- spanned token
   case t of
-    Symbol x -> pure (Many, mkBinder (span, x), Nothing)
-    Pct "(" -> do
-      m <- mult
-      b <- mkBinder <$> spanned (expectSymbol "name in parameter list")
-      t <- peek token
-      ty <- (case t of
-        Pct ":" -> do
-          token
-          Just <$> expr
-        _ -> pure Nothing)
-      expect ")" "closing ')' after parameter"
-      pure (m,b,ty)        
+    Symbol x -> pure [(Many, mkBinder (span, x), Nothing)]
+    Pct "(" -> annotParam ")"
+    Pct "{" -> annotParam "}"    
       
 params :: Parser [Param]
 params = do
@@ -113,10 +158,11 @@ params = do
   case t of
     Symbol _ -> someParams 
     Pct "(" -> someParams
+    Pct "{" -> someParams
     _ -> pure []
   
 someParams :: Parser [Param]
-someParams = (:) <$> param <*> params
+someParams = (++) <$> param <*> params
 
 lam :: Cursor -> Parser Expr
 lam begin = do
@@ -193,6 +239,7 @@ app = do
       Symbol _     -> f
       Pct "Pi"     -> f
       Pct "fun"    -> f
+      Pct "let"    -> f
       Pct "match"  -> f
       Pct "match0" -> f
       Pct "match1" -> f
@@ -201,13 +248,6 @@ app = do
       _            -> pure []
 
   f = (:) <$> primary <*> args
-
-lett :: Cursor -> Parser Expr
-lett begin = do
-  t <- peek token
-  case t of
-    Pct "rec" -> token *> letrec begin
-    _ -> nonrec begin
 
 unfoldParams :: [Param] -> (Maybe Expr, Expr) -> (Maybe Expr, Expr)
 unfoldParams [] x = x
@@ -235,23 +275,14 @@ letBinding = do
     Pct "=" -> f Nothing
     x -> err span "':' or '='" (show x)
   
-nonrec :: Cursor -> Parser Expr
-nonrec begin = do
+lett :: Cursor -> Parser Expr
+lett begin = do
   (v,t,b) <- letBinding
   expect "in" "'in' after binding in let-expression"
   e <- expr
   end <- getCursor
   span <- makeLoc begin end
   pure (ELet span v t b e)
-
-letrec :: Cursor -> Parser Expr
-letrec begin = do
-  funs <- bindings
-  expect "in" "'in' after bindings in let rec expresssion"
-  e <- expr
-  end <- getCursor
-  span <- makeLoc begin end
-  pure (ELetRec span funs e)
 
 arrow :: Parser Expr
 arrow = do
@@ -287,25 +318,6 @@ bindings = do
     Pct "and" -> (:) bind <$> (token *> bindings)
     _ -> pure [bind]
 
-recDecl :: Parser Decl
-recDecl = do
-  binds <- bindings
-  pure (Fixpoint binds)
-
-nonRecDecl :: Cursor -> Parser Decl
-nonRecDecl begin = do
-  (v,t,b) <- letBinding
-  end <- getCursor
-  span <- makeLoc begin end
-  pure (Constant span v t b)
-
-decl :: Cursor -> Parser Decl
-decl begin = do
-  t <- peek token
-  case t of
-    Pct "rec" -> token *> recDecl
-    _ -> nonRecDecl begin
-
 constructors :: Parser [Ctor]
 constructors = do
   t <- peek token
@@ -336,25 +348,43 @@ inductive begin = do
 
 post :: Cursor -> Parser Decl
 post begin = do
-  name <- mkBinder <$> spanned (expectSymbol "name after 'val' keyword in postulate")
+  name <- mkBinder <$> spanned (expectSymbol "name after 'var' keyword in postulate")
   expect ":" "':' after name in postulate"
   ty <- expr
   end <- getCursor
   span <- makeLoc begin end
   pure (Postulate span name ty)
 
-parseModule :: Parser Module
-parseModule = do
+parseDecls :: Parser [Decl]
+parseDecls = do
   ws
   begin <- getCursor
   (span,t) <- spanned token
   case t of
     Pct ""     -> pure []
-    Pct "let"  -> f (decl begin)
-    Pct "val"  -> f (post begin)
-    Pct "type" -> f (Inductive <$> inductive begin)
+    Pct "def"  -> f (Definition <$> bindings)
+    Pct "var"  -> f (post begin)
+    Pct "data" -> f (Inductive <$> inductive begin)
     x -> err span "some declaration" (show x)
-    where f p = (:) <$> p <*> parseModule
+    where f p = (:) <$> p <*> parseDecls
+
+parseImports = do
+  t <- peek token
+  case t of
+    Pct "import" -> do
+      token
+      name <- expectSymbol "name after 'import'"
+      names <- parseImports
+      pure (name:names)
+    _ -> pure []
+
+parseModule :: Parser Module
+parseModule = do
+  expect "module" "module name declaration"
+  name <- expectSymbol "name after 'module'"
+  imports <- parseImports
+  decls <- parseDecls
+  pure (name,imports,decls)
 
 parse :: Filename -> String -> Either ParseError Module
 parse name input = fst <$> Lexer.parse parseModule name (listArray (0,length input - 1) input) (Cursor 0 0 0 0)

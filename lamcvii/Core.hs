@@ -8,6 +8,10 @@ instance Show Mult where
   show Zero = "0"
   show One  = "1"
   show Many = "w"
+  
+-- In the spirit of structuralism, objects have no intrinsic names,
+-- so this string in the Const constructor is just the qualified name
+-- in that context
 
 data Term
   = Box 
@@ -28,6 +32,12 @@ data Reference
   | DeclRef Int             -- name,
   deriving (Eq,Ord,Show)
 
+data Branch = Branch {
+  ctorName  :: String,
+  isDefault :: Bool,
+  ctorArgs  :: [(Mult,String,Term)],
+  branchRhs :: Term}
+
 data CaseDistinction = CaseDistinction {
   elimType :: (Int,Int),   -- type info of eliminee: obj_id, defno
   elimMult :: Mult,        -- multiplicity of the eliminee
@@ -38,20 +48,19 @@ data CaseDistinction = CaseDistinction {
 data Fixpoint = Fixpoint {
   fixType    :: Term,
   fixBody    :: Term,
-  recParamno :: Int,
-  fixHeight  :: Int}
+  recParamno :: Int}
 
-data Inductive = Inductive { -- add paramno?
-  indSort    :: Term,   -- PI quantifies over parameters
-  introRules :: [Term]} -- PI quantifies over parameters and arguments
+data Inductive = Inductive {
+  indSort    :: Term,
+  introRules :: [Term]}
   
-type Definition = (Term,Term,Int) -- type, body, height
+type Definition = (Term,Term) -- type, body
 
-type Declaration = Term -- just the type
+type Declaration = Term
 
-data Globals = Globals {
-  globalInd  :: Map Int [Inductive], -- add globally, uniparamno
-  globalFix  :: Map Int [Fixpoint],  -- add globally, uniparamno and height
+data Objects = Objects {
+  globalInd  :: Map Int [Inductive],
+  globalFix  :: Map Int [Fixpoint],
   globalDef  :: Map Int Definition,
   globalDecl :: Map Int Declaration}
 

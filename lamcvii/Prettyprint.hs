@@ -4,8 +4,12 @@ import Lexer(Loc)
 import Parser(Binder(..))
 import Core
 import Elaborator
+import Typechecker
+
+import Data.Map
 import Data.List
 
+-- this is a bad joke now
 instance Show Error where
   show x = case x of
     Msg msg -> msg
@@ -35,6 +39,13 @@ instance Show Error where
     IntersectUse loc -> show loc ++ "Linear variabel is not used consistently across branches"    
     
     x -> "not ok"
+
+
+showGlobalNames :: Objects -> GlobalNames -> String
+showGlobalNames obs = foldrWithKey (\key val acc -> "module " ++ key ++ "\n" ++ showNameSpace obs val ++ acc) ""
+
+showNameSpace :: Objects -> NameSpace -> String
+showNameSpace obs (_,qnames) = foldrWithKey  (\key (_,ref) acc -> "  " ++ showQName key ++ " : " ++ showTerm [] (typeofRef obs ref) ++ "\n" ++ acc) "" qnames
 
 showTerm :: Context -> Term -> String
 showTerm ctx x = case x of

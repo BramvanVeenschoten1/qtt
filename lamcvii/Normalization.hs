@@ -8,80 +8,63 @@ import Core
 import Multiplicity
 import Substitution
 import Iterator
+--import Prettyprint
+import Debug.Trace
 
 {- here we evalutate terms and test their equality -}
 
+
+{- Alternative definitions for reduce, unwind -}
 data Config = Config Int [Config] Term [Config] -- env depth, env, term, stack
 
 mkConf t = Config 0 [] t []
   
-unwind :: Config -> Term
-unwind (Config k e t s)
-  | Prelude.null s = psubst (fmap unwind e) t
-  | otherwise = App (psubst (fmap unwind e) t) (fmap unwind s)
-
-{- applicative order reduction machine -}
+unwind1 :: Config -> Term
+unwind1 (Config k e t s)
+  | Prelude.null s = psubst (fmap unwind1 e) t
+  | otherwise = App (psubst (fmap unwind1 e) t) (fmap unwind1 s)
 
 unwind2 :: Int -> [Term] -> Term -> [Term] -> Term
-unwind2 k e t s = App (psubst e t) s
+unwind2 k e t s
+  | Prelude.null s = psubst e t
+  | otherwise = App (psubst e t) s
 
-reduce2 :: Globals -> Context -> Term -> Term
-reduce2 glob ctx t = f 0 [] t [] where
-  f :: Int -> [Term] -> Term -> [Term] -> Term
-  f k e (t @ (Var n)) s
-    | n < k = f 0 [] (e !! n) s
-    | otherwise = case hypDef (ctx !! (n - k)) of
-        Nothing -> unwind2 k e t s
-        Just x -> f 0 [] (lift (n - k) x) s
-  f k e (Lam _ _ _ t) (p : s) = f (k + 1) (p : e) t s
-  f k e (Let _ _ m t) s = f (k + 1) (f k e m [] : e) t s
-  f k e (App g xs) s = f k e g (fmap (\x -> f k e x []) xs ++ s)
-  f k e (Const _ (DefRef i _)) s = let
-    Just (_,body,_) = Data.Map.lookup i (globalDef glob)
-    in f 0 [] body s
-  f k e (t @ (Const _ (FixRef i j recparamno _))) s = case nth recparamno s of
-    Just (Const _ (ConRef _ _ _ _)) -> f 0 [] (fixBody ((fromJust (Data.Map.lookup i (globalFix glob))) !! j)) s
-    _ -> unwind2 k e t s
-  f k e (t @ (Case (CaseDistinction _ _ eliminee _ branches))) s =
-    case f k e eliminee [] of
-      App (Const _ (ConRef _ _  i pno)) s' -> let
-        s'' = Prelude.drop pno s'
-        in f k e (branches !! i) (s'' ++ s)
-      _ -> unwind2 k e t s
-  f k e t s = unwind2 k e t s
-
-{- end applicative machine -}
-
-reduce :: Globals -> Context -> Config -> Config
-reduce glob ctx (Config k e t s) = f k e t s where
-  f :: Int -> [Config] -> Term -> [Config] -> Config
+reduce1 :: Objects -> Int -> Context -> Config -> (Config,Bool)
+reduce1 glob delta ctx (Config k e t s) = f k e t s where
+  f :: Int -> [Config] -> Term -> [Config] -> (Config,Bool)
   f k e (t @ (Var n)) s
     | n < k = let Config k' e' t' s' = e !! n in f k' e' t' (s' ++ s)
     | otherwise = case hypDef (ctx !! (n - k)) of
-      Nothing -> Config k e t s
+      Nothing -> (Config k e t s, True)
       Just x -> f 0 [] (lift (n - k + 1) x) s
   f k e (Lam _ _ _ t) (p : s) = f (k + 1) (p : e) t s
-  f k e (Let _ _ m t) s = f (k + 1) (f k e m [] : e) t s
-  f k e (App g xs) s = f k e g (fmap (\x -> f k e x []) xs ++ s)
-  f k e (Const _ (DefRef i _)) s =
-    let Just (_,body,_) = Data.Map.lookup i (globalDef glob) in f 0 [] body s
-  f k e (t @ (Const _ (FixRef i j recparamno _))) s = case nth recparamno s of
-    Just (Config _ _ (Const _ (ConRef _ _ _ _)) _) -> f 0 [] (fixBody ((fromJust (Data.Map.lookup i (globalFix glob))) !! j)) s
-    _ -> Config k e t s
+  f k e (Let _ _ m t) s = f (k + 1) (fst (f k e m []) : e) t s
+  f k e (App g xs) s = f k e g (fmap (\x -> fst (f k e x [])) xs ++ s)
+  f k e (t @ (Const _ (DefRef i height))) s
+    | delta >= height = (Config k e t s, False)
+    | otherwise = f 0 [] (snd (fromJust (Data.Map.lookup i (globalDef glob)))) s
+  f k e (t @ (Const _ (FixRef i j recparamno height))) s = case fmap (fst . reduce1 glob 0 ctx) (nth recparamno s) of
+    Just (Config _ _ (Const _ (ConRef _ _ _ _)) _) ->
+      if delta >= height
+      then (Config k e t s, False)
+      else f 0 [] (fixBody ((fromJust (Data.Map.lookup i (globalFix glob))) !! j)) s
+    _ -> (Config k e t s, True)
   f k e (t @ (Case (CaseDistinction _ _ eliminee _ branches))) s =
     case f k e eliminee [] of
-      Config _ _ (Const _ (ConRef _ _ i pno)) s' -> let
+      (Config _ _ (Const _ (ConRef _ _ i pno)) s',_) -> let
         s'' = Prelude.drop pno s'
         in f k e (branches !! i) (s'' ++ s)
-      _ -> Config k e t s
-  f k e t s = Config k e t s
+      _ -> (Config k e t s, True)
+  f k e t s = (Config k e t s, True)
 
+unwind = unwind1
+reduce = reduce1
 
-whd :: Globals -> Context -> Term -> Term
-whd glob ctx t = unwind (reduce glob ctx (mkConf t))
+whd :: Objects -> Context -> Term -> Term
+whd glob ctx t = unwind (fst (reduce glob 0 ctx (mkConf t)))
 
 -- if flag = True, check equality, else, a `subtype of` b
-sub :: Globals -> Context -> Bool -> Term -> Term -> Bool    
+sub :: Objects -> Context -> Bool -> Term -> Term -> Bool    
 sub glob ctx flag t0 t1 = alpha_eq ctx flag t0 t1 || machineEq flag t0 t1 where
   alpha_eq ctx flag t0 t1 = case (t0,t1) of
     (Box,Box) -> True
@@ -105,11 +88,41 @@ sub glob ctx flag t0 t1 = alpha_eq ctx flag t0 t1 || machineEq flag t0 t1 where
       and (zipWith (sub glob ctx flag) (branches ref) (branches ref1))
     _ -> False
   
-  whdm = reduce glob ctx
+  heightOf (Const _ (DefRef _ h)) = h
+  heightOf (Const _ (FixRef _ _ _ h)) = h
+  heightOf (App (Const _ (DefRef _ h)) _) = h
+  heightOf (App (Const _ (FixRef _ _ _ h)) _) = h
+  heightOf _ = 0
   
-  machineEq flag t0 t1 = convertMachines flag (whdm (mkConf t0)) (whdm (mkConf t1))
+  whdm = reduce glob maxBound ctx
   
-  convertMachines flag (m0 @ (Config k0 e0 t0 s0)) (m1 @ (Config k1 e1 t1 s1)) =
-    alpha_eq ctx flag (unwind (Config k0 e0 t0 [])) (unwind (Config k1 e1 t1 [])) &&
-      and (zipWith (\t0 t1 -> convertMachines True (whdm t0) (whdm t1)) s0 s1)
+  machineEq flag = on (convertMachines flag) (whdm . mkConf)
+  
+  smallDeltaStep :: Bool -> (Config,Bool) -> (Config,Bool) -> Bool
+  smallDeltaStep flag (m0 @ ((Config _ _ t0 _), norm0)) (m1 @ ((Config _ _ t1 _), norm1)) = let
+    h0 = heightOf t0
+    h1 = heightOf t1
+    
+    delta
+      | norm0     = h1 - 1
+      | norm1     = h0 - 1
+      | h0 == h1  = max 0 (h0 - 1)
+      | otherwise = min h0 h1
+      
+    m0' = reduce glob delta ctx (fst m0)
+    m1' = reduce glob delta ctx (fst m1)
+    
+    proceed
+      | norm0     = convertMachines flag m0  m1'
+      | norm1     = convertMachines flag m0' m1
+      | otherwise = convertMachines flag m0' m1'
+    in proceed
+  
+  convertMachines flag (m0 @ ((Config k0 e0 t0 s0),norm0)) (m1 @ ((Config k1 e1 t1 s1),norm1)) =
+    (alpha_eq ctx flag (unwind (Config k0 e0 t0 [])) (unwind (Config k1 e1 t1 [])) &&
+      and (zipWith (on (convertMachines True) whdm) s0 s1)) ||
+        {-flip const (trace (
+          showTerm ctx (unwind (fst m0)) ++ "\n" ++
+          showTerm ctx (unwind (fst m1)) ++ "\n"))-}
+            (not (norm0 && norm1) && smallDeltaStep flag m0 m1)
 

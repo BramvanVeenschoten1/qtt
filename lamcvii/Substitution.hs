@@ -23,16 +23,13 @@ psubst args = f 0 where
     | n >= k + nargs = Var (n - nargs) -- free
     | n < k = t -- local
     | otherwise = lift k (args !! (n - k)) -- in bounds
-  f k (t @ (App fun args)) =
-    let foo (Lam _ _ _ body) (arg:args) = foo (psubst [arg] body) args
-        foo fun [] = fun
-        foo fun args = App fun args
-        
-        bar args body = psubst args body
-      
-      in foo (f k fun) (fmap (f k) args)
-      
+  f k (t @ (App fun args)) = g (f k fun) (fmap (f k) args)
   f k t = Iterator.map (const (+1)) k f t
+  
+  g (Lam _ _ _ body) (arg:args) = g (psubst [arg] body) args
+  g fun [] = fun
+  g (App f args) args' = App f (args ++ args')
+  g fun args = App fun args
 
 subst :: Term -> Term -> Term
 subst = psubst . (:[])

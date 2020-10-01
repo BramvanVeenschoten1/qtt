@@ -12,9 +12,7 @@ import Data.Either
 import Data.Maybe
 
 import Lexer(Loc)
-import Normalization
 import Substitution
-import Typechecker
 import Multiplicity
 import Parser
 import Core(Term(..), Context)
@@ -49,6 +47,24 @@ data Error
   | IntersectUse Loc -- linear variable is used inconsistently across match arms
 
 err msg = TypeError (Msg msg)
+
+type NameSpace = (Map Name [QName], Map QName (Loc, C.Reference))
+
+type GlobalNames = Map Name NameSpace
+
+mergeNameSpace :: NameSpace -> NameSpace -> NameSpace
+mergeNameSpace (n0,q0) (n1,q1) = (Data.Map.unionWith (++) n0 n1, Data.Map.union q0 q1)
+
+emptyNameSpace :: NameSpace
+emptyNameSpace = (Data.Map.empty,Data.Map.empty)
+
+emptyObjects = C.Objects Data.Map.empty Data.Map.empty Data.Map.empty Data.Map.empty
+
+lookupQName :: QName -> ElabState -> Maybe (Loc,C.Reference)
+lookupQName qname glob = lookup qname (Data.Map.union (snd (internalNames glob)) (snd (importedNames glob)))
+
+lookupName :: Name -> ElabState -> Maybe [QName]
+lookupName name glob = lookup name (unionWith (++) (fst (importedNames glob)) (fst (internalNames glob)))
 
 data Result a
   = Clear a
@@ -97,10 +113,11 @@ disambiguate result = case compress result of
   TypeError err -> Left err
   Ambiguous n i xs -> Left (Ambiguity n i (fmap fst xs))
 
-data GlobalState = GlobalState {
+data ElabState = ElabState {
   newName       :: Int,
-  symbolTable   :: Map Name [QName],
-  qsymbolTable  :: Map QName (Loc, C.Reference),
-  globalObjects :: C.Globals}
+  moduleName    :: Name,
+  importedNames :: NameSpace,
+  internalNames :: NameSpace,
+  globalObjects :: C.Objects}
 
 type Elab a = Result a

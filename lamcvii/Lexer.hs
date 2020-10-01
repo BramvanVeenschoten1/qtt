@@ -13,7 +13,7 @@ puncts = [
   "["  , "]", "{", "}", "_",
   "<"  ,  ">" , "!" , ";" , "\\" ,  ".", ":", ","]
 
-keywords = ["let", "rec", "in", "type", "and", "match", "match0", "match1", "return", "with", "fun", "Pi", "Type", "int", "val"]
+keywords = ["module", "import", "var", "data", "def", "and", "let", "in", "match", "match0", "match1", "return", "with", "fun", "Pi", "Type"]
 
 data Cursor = Cursor {
   cursorIndex :: Int,
