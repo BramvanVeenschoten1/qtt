@@ -1,0 +1,76 @@
+module Prelude
+
+(* Identity *)
+
+def Id {0 A : Type}(0 x y : A): Type = Pi P : A -> Type, P x -> P y
+
+def refl {0 A : Type}{0 x : A}: Id A x x = fun _ px -> px
+
+def sym {0 A : Type}{0 x y : A}(eq : Id A x y): Id A y x = eq (fun z -> Id A z x) (refl A x)
+
+def trans {0 A : Type}{0 x y z : A}(eq0 : Id A x y)(eq1 : Id A y z): Id A x z = eq1 (Id A x) eq0
+
+def cong {0 A B : Type}{0 x y : A}(0 f : A -> B)(eq : Id A x y): Id B (f x)(f y) = eq (fun z -> Id B (f x)(f z)) (refl B (f x))
+
+var uip : Pi 0 A : Type, Pi 0 x : A, Pi 0 y : A, Pi 0 eq0 : Id A x y, Pi 0 eq1 : Id A x y, Id (Id A x y) eq0 eq1
+
+var id_irrelevant: Pi 0 A : Type, Pi 0 x : A, Pi 0 y : A, Id A x y => Id A x y 
+
+(* some basic datatypes *)
+
+data Unit
+| tt : Unit
+
+data Void
+
+data Pair (A B : Type)
+| mk : Pi 1 _ : A, Pi 1 _ : B, Pair A B
+
+data DPair (A : Type)(B : A -> Type)
+| mk : Pi 1 x : A, Pi 1 _ : B x, DPair A B
+
+data DPair0 (A : Type)(B : A -> Type)
+| mk : Pi 0 x : A, Pi 1 _ : B x, DPair0 A B
+
+def Unit_equal : Pi 0 x : Unit, Pi 0 y : Unit, Id Unit x y =
+  fun x -> match0 x return fun (x : Unit) -> Pi 0 y : Unit, Id Unit x y with
+  | tt -> fun y -> match0 y return fun (y : Unit) -> Id Unit tt y with
+    | tt -> refl Unit tt
+
+def Unit_irrelevant (0 x : Unit): DPair Unit (fun y -> Id Unit x y) =
+  Prelude.DPair.mk Unit (fun y -> Id Unit x y) tt (Unit_equal x tt)
+
+def void_irrelevant (0 x : Void): DPair Void (fun y -> Id Void x y) =
+  match0 x return fun (x : Void) -> DPair Void (fun y -> Id Void x y) with
+
+data Maybe(A : Type)
+| Nothing : Maybe A
+| Just : A -o Maybe A
+
+(* Bool *)
+
+data Bool
+| true  : Bool
+| false : Bool
+
+def not (b : Bool) : Bool =
+  match b with
+  | true -> false
+  | false -> true
+
+def lift (b : Bool) : Type =
+  match b with
+  | true -> Unit
+  | false -> Void
+
+def distinct (eq : Id Bool true false): Void =
+  eq lift tt
+ 
+(* Accessible *)
+
+data Acc(0 A : Type)(0 R : A -> A -> Type)(x : A)
+| mk : (Pi y : A, R y x -> Acc A R y) -> Acc A R x
+
+def wf_rec(0 A : Type)(0 R : A -> A -> Type)(0 P : A -> Type)(f : Pi x : A, (Pi y : A, R y x -> P y) -> P x)(x : A)(0 acc_x : Acc A R x): P x =
+  match0 acc_x with
+  | mk g -> f x (fun y lt -> wf_rec A R P f y (g y lt))

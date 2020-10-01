@@ -1,0 +1,157 @@
+module Foo
+
+import Prelude
+import Nat
+import List
+
+(* mutual inductive test *)
+data Foo(A B : Type)
+| nil : Foo A B
+| cons : A => Bar A B -> Foo A B
+and Bar(X Y : Type)
+| nol : Bar X Y
+| cins : Y -o Foo X Y -> Bar X Y
+
+(* mutual recursive test *)
+def Foo_ind
+  (A : Type)
+  (B : Type)
+  (P : Foo A B -> Type)
+  (Q : Bar A B -> Type)
+  (pnil : P (nil A B))
+  (qnil : Q (nol A B))
+  (pcons : Pi 0 x : A, Pi xs : Bar A B, Q xs -> P (cons A B x xs))
+  (qcons : Pi x : B, Pi xs : Foo A B, P xs -> Q (cins A B x xs))
+  (xs : Foo A B):
+    P xs =
+  match xs return P with
+  | nil -> pnil
+  | cons x xs -> pcons x xs (bar_ind A B P Q pnil qnil pcons qcons xs)
+and bar_ind
+  (A : Type)
+  (B : Type)
+  (P : Foo A B -> Type)
+  (Q : Bar A B -> Type)
+  (pnil : P (nil A B))
+  (qnil : Q (nol A B))
+  (pcons : Pi 0 x : A, Pi xs : Bar A B, Q xs -> P (cons A B x xs))
+  (qcons : Pi x : B, Pi xs : Foo A B, P xs -> Q (cins A B x xs))
+  (xs : Bar A B):
+    Q xs =
+  match xs return Q with
+  | nol -> qnil
+  | cins x xs -> qcons x xs (Foo_ind A B P Q pnil qnil pcons qcons xs)
+
+(* 3-ary list of Bools *)
+
+def threeBools : List Bool = MakeList Bool (succ (succ (succ zero))) true false true
+
+(* Vec By large elimination *)
+
+def Vec_0 (A : Type)(n : Nat): Type =
+  match n with
+  | zero -> Unit
+  | succ n -> Pair A (Vec_0 A n)
+
+def Fin_0 (n : Nat): Type =
+  match n with
+  | zero -> Void
+  | succ n -> Maybe (Fin_0 n)
+
+(* having only one reachable branch, the match on n should be erasable *)
+def nth_2 (0 A : Type)(n : Nat): Vec_0 A n -> Fin_0 n -> A =
+  match n return fun (m : Nat) -> Vec_0 A m -> Fin_0 m -> A with
+  | zero -> fun xs i -> (match0 i with)
+  | succ n -> fun xs i ->
+    match xs with
+    | mk x xs ->
+      match i with
+      | Nothing -> x
+      | Just i -> nth_2 A n xs i
+
+(* Vec by second-class indexed datas *)
+
+data Vec_1 (A : Type)(n : Nat)
+| nil : NatEq n zero => Vec_1 A n
+| cons : Pi 0 m : Nat, A -o Vec_1 A m -o NatEq n (succ m) => Vec_1 A n
+
+data Fin_1(n : Nat)
+| fzero : Pi 0 m : Nat, NatEq n (succ m) => Fin_1 n
+| fsucc : Pi 0 m : Nat, Fin_1 m -o NatEq n (succ m) => Fin_1 n
+
+def fin_zero_empty(x : Fin_1 zero): Void =
+  let f (0 m : Nat)(0 eq : NatEq zero (succ m)): Void =
+    elim_neq zero (succ m) eq (fun x -> match x with | zero -> Unit | succ _ -> Void) tt
+  in
+  match x with
+  | fzero m eq -> f m eq
+  | fsucc m _ eq -> f m eq
+
+def nth_3 (0 A : Type)(0 n : Nat)(xs : Vec_1 A n)(i : Fin_1 n): A =
+  match xs with
+  | nil eq0 -> (match0 fin_zero_empty (elim_neq n zero eq0 Fin_1 i) with)
+  | cons m0 x xs eq0 -> match i with
+    | fzero m1 eq1 -> x
+    | fsucc m1 i eq1 ->
+      nth_3 A m0 xs (elim_neq m1 m0 (elim_neq n (succ m1) eq1 (fun z -> NatEq z (succ m0)) eq0) Fin_1 i)
+ 
+(* derivation of induction on natural numbers using well-founded recursion *)
+def nat_wf_rec(0 P : Nat -> Type)(pz : P zero)(ps : Pi n : Nat, P n -> P (succ n))(n : Nat): P n =
+  wf_rec Nat Less P (fun x -> match x return fun (x : Nat) -> (Pi y : Nat, Less y x -> P y) -> P x with
+    | zero -> fun _ -> pz
+    | succ n -> fun f -> ps n (f n (less_than_succ n))) n (nat_acc n)
+
+(* definition of zipWith for vectors, using postulates because inductive families aren't a thing *)
+var Vec : Type => Nat => Type
+var nil : Pi 0 A : Type, Vec A zero
+var cons : Pi 0 A : Type, Pi 0 n : Nat, A -o Vec A n -o Vec A (succ n)
+var vec_rec :
+  Pi 0 A : Type,
+  Pi 0 P : (Pi 0 n : Nat, Vec A n -> Type),
+  P zero (nil A) ->
+  (Pi 0 n : Nat, Pi x : A, Pi xs : Vec A n, P n xs -> P (succ n) (cons A n x xs)) ->
+  Pi 0 n : Nat,
+  Pi xs : Vec A n,
+    P n xs
+
+def zipWith {0 A B C : Type}{0 n : Nat}(f : A -> B -> C): Pi xs : Vec A n, Pi ys : Vec B n, Vec C n =
+  fun xs ->
+    vec_rec A (fun n xs -> Pi ys : Vec B n, Vec C n)
+      (fun n -> Foo.nil C)
+      (fun m x _ ih ys ->
+        vec_rec B (fun n ys -> Id Nat (succ m) n -> Vec C n)
+          (fun eq -> match eq (fun x -> match x with | zero -> Void | succ _ -> Unit) tt with)
+          (fun k y ys _ eq -> Foo.cons C k (f x y) (eq (fun m -> match m with | zero -> Void | succ m -> Vec B m -> Vec C m) ih ys))
+          (succ m)
+          ys (refl Nat (succ m)))
+      n xs
+
+(*
+useless notes
+
+def less_trans : Pi y : Nat, Pi m : Nat, Pi n : Nat, Less y m -> Less m (succ n) -> Less y n
+| _        zero     _        lt _  = unreachable
+| _        (succ n) zero     _  lt = unreachable
+| zero     (succ n) (succ m) _  _  = tt
+| (succ y) (succ n) (succ m) l1 l2 = less_trans y n m l1 l2
+
+
+; dependent lisp
+(def (less-trans ((y Nat)(m Nat)(n Nat))(Pi ((_ (Less y m))(_ (Less m (succ n)))) (Less y n))
+  (def P (fn ((y Nat)(m Nat)(n Nat)) (Pi ((_ (Less y m))(_ (Less m (succ n)))) (Less y n)))
+    (match m (fn ((m Nat)) (P y m n))
+      zero (fn (lt _) (match (less_than_zero y lt) _))
+      (succ m)
+        (match n (fn ((n Nat)) (P y (succ m) n))
+          zero (fn (_ lt) (match (less_than_zero m lt) _))
+          (succ n)
+            (match y (fn ((y Nat)) (P y (succ m) (succ n)))
+              zero (fn (_ _) tt)
+              (succ y) (less_trans y m n)))))))
+
+(def (less_trans () (Pi ((y Nat)(m Nat)(n Nat)(_ (Less y m))(_ (Less m (succ n)))) (Less y n))
+(_        zero     _        lt _ ) unreachable
+(_        (succ n) zero     _  lt) unreachable
+(zero     (succ n) (succ m) _  _ ) tt
+((succ y) (succ n) (succ m) l2 l2) (less_trans y n m l1 l2)))
+*)

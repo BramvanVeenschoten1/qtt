@@ -1,0 +1,128 @@
+module Nat
+
+import Prelude
+
+data Nat
+| zero : Nat
+| succ : Nat -o Nat
+
+def nat_rec (0 P : Nat -> Type)(pz : P zero)(ps : Pi n : Nat, P n -> P (succ n))(n : Nat): P n =
+  match n return P with
+  | zero -> pz
+  | succ m -> ps m (nat_rec P pz ps m)
+
+def nat_case (0 P : Nat -> Type)(pz : P zero)(ps : Pi n : Nat, P (succ n))(n : Nat): P n =
+  match n return P with
+  | zero -> pz
+  | succ n -> ps n
+
+def plus (n m : Nat): Nat = 
+  match n with
+  | zero -> m
+  | succ n -> succ (plus n m)
+
+def plus_zero(n : Nat): Id Nat n (plus n zero) =
+  match n return fun (n : Nat) -> Id Nat n (plus n zero) with
+  | zero -> refl Nat zero
+  | succ n -> let ih = plus_zero n in cong Nat Nat n (plus n zero) succ ih
+
+def plus_succ (n m : Nat): Id Nat (succ (plus m n)) (plus m (succ n)) =
+  match m return fun (m : Nat) -> Id Nat (succ (plus m n)) (plus m (succ n)) with
+  | zero -> refl Nat (succ n)
+  | succ m -> let ih = plus_succ n m in cong Nat Nat (succ (plus m n)) (plus m (succ n)) succ ih
+
+def plus_commutes(n m : Nat): Id Nat (plus n m) (plus m n) =
+  match n return fun (n : Nat) -> Id Nat (plus n m) (plus m n) with
+  | zero -> plus_zero m
+  | succ n ->
+    let ih = plus_commutes n m in 
+    let ps = plus_succ n m in
+      ps (fun k -> Id Nat (succ (plus n m)) k) (cong Nat Nat (plus n m) (plus m n) succ ih)
+
+def mult(n m : Nat): Nat =
+  match n with
+  | zero -> zero
+  | succ n -> plus m (mult n m)
+
+def eq (n m : Nat): Bool =
+  match n with
+  | zero -> (match m with
+    | zero -> true
+    | succ m -> false)
+  | succ n -> (match m with
+    | zero -> false
+    | succ m -> eq n m)
+
+def NatEq (n m : Nat): Type = lift (eq n m)
+
+def NatRefl: Pi n : Nat, NatEq n n =
+  nat_rec (fun n -> NatEq n n) tt (fun _ ih -> ih)
+
+(* Id Nat <-> NatEq *)
+def dec_eq(n m : Nat): NatEq n m => Id Nat n m =
+  match n return fun (n : Nat) -> NatEq n m => Id Nat n m with
+  | zero -> (match m return fun (y : Nat) -> NatEq zero y => Id Nat zero y with
+    | zero -> fun _ -> refl Nat zero
+    | succ m -> fun p -> (match0 p with))
+  | succ n -> (match m return fun (y : Nat) -> NatEq (succ n) y => Id Nat (succ n) y with
+    | zero -> fun p -> (match0 p with)
+    | succ m -> fun p -> cong Nat Nat n m succ (dec_eq n m p))
+
+def dec_eq_inv(n m : Nat): Id Nat n m -> NatEq n m =
+  fun eq -> eq (fun k -> NatEq n k) (NatRefl n)
+
+(* uniqueness of identity proofs for nat *)
+
+def elim_neq(0 n m : Nat)(0 eq : NatEq n m): Id Nat n m =
+  id_irrelevant Nat n m (dec_eq n m eq)
+
+def nat_uip(n m : Nat): Pi 0 x : NatEq n m, Pi 0 y : NatEq n m, Id (NatEq n m) x y =
+  match n return fun (i : Nat) -> Pi 0 x : NatEq i m, Pi 0 y : NatEq i m, Id (NatEq i m) x y with
+  | zero -> (match m return fun (j : Nat) -> Pi 0 x : NatEq zero j, Pi 0 y : NatEq zero j, Id (NatEq zero j) x y with
+    | zero -> Unit_equal
+    | succ m -> fun x _ -> (match0 x with))
+  | succ n -> (match m return fun (j : Nat)  -> Pi 0 x : NatEq (succ n) j, Pi 0 y : NatEq (succ n) j, Id (NatEq (succ n) j) x y with
+    | zero -> fun x _ -> (match0 x with)
+    | succ m -> nat_uip n m)
+
+(* dec_eq equations, equations not implemented
+def dec_eq: Pi n : Nat, Pi m : Nat, lift (eq n m) => Id Nat n m
+| zero     zero     _ -> refl Nat zero
+| (succ n) (succ m) p -> dec_eq n m p
+| _        _        p -> (match0 p with)
+*)
+
+(* Nat is accessible *)
+
+def Less(n m : Nat): Type =
+  match m with
+  | zero -> Void
+  | succ m ->
+    match n with
+    | zero -> Unit
+    | succ n -> Less n m
+
+def less_than_zero : Pi n : Nat, Less n zero -> Void =
+  nat_case (fun n -> Less n zero -> Void) (fun x -> x) (fun _ x -> x)
+
+def less_than_succ : Pi n : Nat, Less n (succ n) =
+  nat_rec (fun (n : Nat) -> Less n (succ n)) tt (fun _ ih -> ih)
+
+def less_trans(y m n : Nat): Less y m -> Less m (succ n) -> Less y n =
+  let P = fun (y m n : Nat) -> Less y m -> Less m (succ n) -> Less y n in
+  match m return fun (m : Nat) -> P y m n with
+  | zero -> (fun lt _ -> match less_than_zero y lt with)
+  | succ m ->
+    match n return fun (n : Nat) -> P y (succ m) n with
+    | zero -> (fun _ lt -> match less_than_zero m lt with)
+    | succ n ->
+      match y return fun (y : Nat) -> P y (succ m) (succ n) with
+      | zero -> fun _ _ -> tt
+      | succ y -> less_trans y m n
+
+def nat_less_acc(n m : Nat): Less m n -> Acc Nat Less m =
+  match n return fun (n : Nat) -> Less m n -> Acc Nat Less m with
+  | zero -> (fun le -> match less_than_zero m le with)
+  | succ n -> fun le -> Prelude.Acc.mk Nat Less m (fun y le2 -> nat_less_acc n y (less_trans y m n le2 le))
+
+def nat_acc(n : Nat): Acc Nat Less n = nat_less_acc (succ n) n (less_than_succ n)

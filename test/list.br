@@ -1,0 +1,76 @@
+module List
+
+import Prelude
+import Nat
+  
+(* List *)
+
+data List (A : Type)
+| nil : List A
+| cons : A -o List A -o List A
+
+def list_rec (0 A : Type)(0 P : List A -> Type)(pnil : P (nil A))(pcons : Pi x : A, Pi xs : List A, P xs -> P (cons A x xs))(xs : List A): P xs =
+  match xs return P with
+  | nil -> pnil
+  | cons x xs -> pcons x xs (list_rec A P pnil pcons xs)
+
+def foldr (0 A B : Type)(f : A -o B -o B)(1 acc : B)(1 xs : List A): B =
+  match1 xs with
+  | nil -> acc
+  | cons x xs -> f x (foldr A B f acc xs)
+
+def foldl (0 A B : Type)(f : A -o B -o B)(1 acc : B)(1 xs : List A): B =
+ match1 xs with
+ | nil -> acc
+ | cons x xs -> foldl A B f (f x acc) xs
+
+def reverse(0 A : Type): List A -o List A =
+  foldl A (List A) (cons A) (nil A)
+
+def length(0 A : Type)(xs : List A): Nat =
+  match xs with
+  | nil -> zero
+  | cons _ xs -> succ (length A xs)
+
+def append(0 A : Type)(1 xs : List A)(1 ys : List A): List A =
+  foldr A (List A) (cons A) ys xs
+
+def nth (0 A : Type)(n : Nat)(xs : List A): Less n (length A xs) => A =
+  match xs return fun (zs : List A) -> Less n (length A zs) => A with
+  | nil -> fun le -> (match0 less_than_zero n le with)
+  | cons x xs -> match n return fun (m : Nat) -> Less m (succ (length A xs)) => A with
+    | zero -> fun _ -> x
+    | succ n -> nth A n xs
+
+(* len (xs ++ ys) = len xs + len ys *)
+
+(* proof by dependent pattern matching *)
+def append_length (0 A : Type)(xs ys : List A): Id Nat (plus (length A xs)(length A ys)) (length A (append A xs ys)) =
+  match xs return fun (zs : List A) -> Id Nat (plus (length A zs)(length A ys))(length A (append A zs ys)) with 
+  | nil -> refl Nat (length A ys)
+  | cons _ xs -> cong Nat Nat (plus (length A xs)(length A ys)) (length A (append A xs ys)) succ (append_length A xs ys)
+
+(* proof by induction principle *)
+def append_length2  (0 A : Type)(xs ys : List A): Id Nat (plus (length A xs)(length A ys)) (length A (append A xs ys)) =
+  let len = length A in
+  let app = append A in
+  list_rec A
+    (fun (zs : List A) -> Id Nat (plus (len zs)(len ys))(len (app zs ys)))
+    (refl Nat (len ys))
+    (fun x xs ih -> cong Nat Nat (plus (len xs)(len ys))(len (app xs ys)) succ ih)
+    xs
+
+(* Build n-ary lists *)
+
+def NaryType(0 A : Type)(n : Nat): Type =
+  match n with
+  | zero -> List A
+  | succ n -> A -> NaryType A n
+
+def NaryImp(0 A : Type)(n : Nat)(xs : List A): NaryType A n =
+  match n return NaryType A with
+  | zero -> reverse A xs
+  | succ n -> fun x -> NaryImp A n (cons A x xs)
+
+def MakeList (0 A : Type)(n : Nat): NaryType A n =
+  NaryImp A n (nil A)
