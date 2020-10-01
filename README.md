@@ -8,8 +8,8 @@ The core language features:
 - simple dependent case distinction expressions, with multiplicity annotations on the discriminee
 
 The elaborator features
+- a simple module system
 - type-driven disambiguation of names from different modules
-- no modules
 - a bidirectional type checking algorithm
 
 Notes on future features can be found in lamcvii/Main.hs
