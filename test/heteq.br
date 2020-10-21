@@ -1,0 +1,17 @@
+module Heteq
+
+import Prelude
+
+def Id(0 A B : Type)(0 x : A)(0 y : B): Type =
+  Pi 0 P : (Pi C : Type, C -> Type), P A x -> P B y
+
+def refl(0 A : Type)(0 x : A): Id A A x x = fun P px -> px
+
+def sym (0 A B : Type)(0 x : A)(0 y : B): Id A B x y -> Id B A y x =
+  fun r -> r (fun C z -> Id C A z x) (refl A x)
+
+def trans(0 A B C : Type)(0 x : A)(0 y : B)(0 z : C): Id A B x y -> Id B C y z -> Id A C x z =
+  fun r0 r1 -> r1 (fun D w -> Id A D x w) r0
+
+def cong (A B : Type)(0 x y : A)(f : Pi A : Type, A -> B)(eq : Id A A x y): Id B B (f A x) (f A y) =
+  eq (fun C z -> Id B B (f A x) (f C z)) (refl B (f A x))

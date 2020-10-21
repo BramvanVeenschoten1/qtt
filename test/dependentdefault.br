@@ -1,0 +1,34 @@
+module Dependentdefault
+
+import Prelude
+
+var Q : Type
+
+data D
+| A : Q -> D
+| B : D
+| C : D
+
+(* non-dependent default branch *)
+def isA (x : D): Type =
+  match x with
+  | A _ -> Unit
+  | _ -> Void
+
+def default_linear(1 x : D): D =
+  match1 x with
+  | x -> x
+
+(*
+  Here we see dependent default branches in action.
+  The default branch will not typecheck against (isA x -> Q), because
+  it does not reduce to (void -> Q). Instead, we compute the type from
+  the defaulting constructors:
+    isA B -> Q  ~>  Void -> Bool
+    isA C -> Q  ~>  Void -> Bool
+  then check the default branch against those
+*)
+def fromA (x : D): isA x -> Q =
+  match x return fun (x : D) -> isA x -> Q with
+  | A b -> fun _ -> b
+  | _ -> fun void -> match void with

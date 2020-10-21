@@ -1,0 +1,7 @@
+module Partialcover
+
+import Prelude
+
+def foo (x : Maybe Void): Void =
+  match x with
+  | Just x -> x

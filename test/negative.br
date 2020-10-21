@@ -10,8 +10,3 @@ def omega : Neg -> Void =
   fun x -> match x with | mk y -> y x
 
 def Omega : Void = omega (mk omega)
-
-data Id (A : Type)(x : A): A -> Type
-| refl : Id A x x
-
-elim_Id (A : Type)(x y : A)(P : A -> Type)(eq : Id A x y)(px : P x): P y

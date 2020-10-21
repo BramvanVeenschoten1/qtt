@@ -1,0 +1,15 @@
+module Nested
+
+import Prelude
+import List
+
+(* nested inductive type *)
+data Tree (A : Type)
+| leaf : A -o Tree A
+| node : List (Tree A) -o Tree A
+
+(* nested fixpoint *)
+def fold_nested (0 A B : Type)(f : A -o B -o B)(1 acc : B)(1 xs : Tree A): B =
+  match1 xs with
+  | leaf x -> f x acc
+  | node xs -> foldr (Tree A) B (fun xs acc -> fold_nested A B f acc xs) acc xs

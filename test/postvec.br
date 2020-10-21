@@ -1,0 +1,45 @@
+module Postvec
+
+import Nat
+import Prelude
+
+(* Vec by postulated indexed datatypes*)
+var Vec : Type => Nat => Type
+var nil : Pi A : Type, Vec A zero
+var cons : Pi A : Type, Pi n : Nat, A -o Vec A n -o Vec A (succ n)
+var vec_rec :
+  Pi 0 A : Type,
+  Pi P : (Pi n : Nat, Vec A n -> Type),
+  P zero (nil A) ->
+  (Pi n : Nat, Pi x : A, Pi xs : Vec A n, P n xs -> P (succ n) (cons A n x xs)) ->
+  Pi n : Nat,
+  Pi xs : Vec A n,
+    P n xs
+
+var Fin : Nat => Type
+var fzero : Pi n : Nat, Fin (succ n)
+var fsucc : Pi n : Nat, Fin n -> Fin (succ n)
+var fin_rec : 
+  Pi P : (Pi n : Nat, Fin n -> Type),
+  (Pi n : Nat, P (succ n) (fzero n)) ->
+  (Pi (n : Nat)(i : Fin n), P (succ n) (fsucc n i)) ->
+  Pi (n : Nat)(i : Fin n), P n i
+
+def nth {A : Type}{n : Nat}(xs : Vec A n): Fin n -> A =
+  vec_rec A (fun n xs -> Fin n -> A)
+    (fin_rec (fun m i -> match m with | zero -> A | succ _ -> Unit) (fun _ -> tt) (fun _ _ -> tt) zero)
+    (fun n x xs ih i -> fin_rec (fun m i -> Id Nat m (succ n) -> A)
+      (fun m eq -> x)
+      (fun m i eq -> ih (eq (fun x -> match x with | zero -> Void | succ m -> Fin m) i)) (succ n) i (refl Nat (succ n)))
+    n xs
+
+def zipWith {A B C : Type}{n : Nat}(f : A -> B -> C)(xs : Vec A n): Pi ys : Vec B n, Vec C n =
+  vec_rec A (fun n xs -> Pi ys : Vec B n, Vec C n)
+    (fun ys -> nil C)
+    (fun m x _ ih ys ->
+      vec_rec B (fun n ys -> no_conf (succ m) n -> Vec C n)
+        (fun eq -> match eq with)
+        (fun k y ys _ eq -> cons C k (f x y) (nat_eq_pred m k eq (fun m -> Vec B m -> Vec C m) ih ys))
+        (succ m)
+        ys (refl Nat (succ m)))
+    n xs

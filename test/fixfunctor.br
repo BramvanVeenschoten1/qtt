@@ -1,0 +1,4 @@
+module Fixfunctor
+
+data Fix (f : Type -> Type)
+| mk : f (Fix f) -> Fix f

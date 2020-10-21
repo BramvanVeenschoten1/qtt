@@ -1,0 +1,85 @@
+module Largevec
+
+import Prelude
+import Nat
+
+def Vec(A : Type)(n : Nat): Type =
+  match n with
+  | zero -> Unit
+  | succ n -> Pair A (Vec A n)
+
+def Fin (n : Nat): Type =
+  match n with
+  | zero -> Void
+  | succ n -> Maybe (Fin n)
+
+def nat_match0(n : Nat): (Id Nat n zero -> Void) -> DPair Nat (fun m -> Id Nat n (succ m)) =
+  match n return fun (n : Nat) -> (Id Nat n zero -> Void) -> DPair Nat (fun m -> Id Nat n (succ m)) with
+  | zero -> (fun nz -> match nz (refl Nat zero) with)
+  | succ n -> fun nz -> Prelude.DPair.mk Nat (fun m -> Id Nat (succ n) (succ m)) n (refl Nat (succ n))
+
+def nth(0 A : Type)(n : Nat): Vec A n -> Fin n -> A =
+  match n return fun (m : Nat) -> Vec A m -> Fin m -> A with
+  | zero -> fun xs i -> (match0 i with)
+  | succ n -> fun xs i ->
+    match xs with
+    | mk x xs ->
+      match i with
+      | Nothing -> x
+      | Just i -> nth A n xs i
+
+def zipWith(0 A B C : Type)(f : A -o B -o C)(1 n : Nat): Vec A n -o Vec B n -o Vec C n =
+  match1 n return fun (n : Nat) -> Vec A n -o Vec B n -o Vec C n with
+  | zero -> (fun xs ys -> match1 xs with | tt -> match1 ys with | tt -> tt)
+  | succ n -> (fun xs ys -> match1 xs with
+    | mk x xs -> match1 ys with
+      | mk y ys -> Prelude.Pair.mk C (Vec C n) (f x y) (zipWith A B C f n xs ys))
+ 
+def append(A : Type)(n m : Nat): Vec A n -o Vec A m -o Vec A (plus n m) =
+  match n return fun (n : Nat) -> Vec A n -o Vec A m -o Vec A (plus n m) with
+  | zero -> (fun xs ys -> match1 xs with | tt -> ys)
+  | succ n -> fun xs ys ->
+    match1 xs with
+    | mk x xs -> mk A (Vec A (plus n m)) x (append A n m xs ys)
+
+def append_associates_motive
+  (A : Type)
+  (n m o : Nat)
+  (xs : Vec A n)
+  (ys : Vec A m)
+  (zs : Vec A o)
+  : Type =
+  Prelude.Id
+    (DPair Nat (Vec A))
+	(Prelude.DPair.mk Nat (Vec A) (plus n (plus m o)) (append A n (plus m o) xs (append A m o ys zs)))
+	(Prelude.DPair.mk Nat (Vec A) (plus (plus n m) o) (append A (plus n m) o (append A n m xs ys) zs))
+
+def append_associates (A : Type):
+  Pi (n m o : Nat)
+     (xs : Vec A n)
+     (ys : Vec A m)
+     (zs : Vec A o),
+  Id (DPair Nat (Vec A))
+	   (Prelude.DPair.mk Nat (Vec A) (plus n (plus m o)) (append A n (plus m o) xs (append A m o ys zs)))
+	   (Prelude.DPair.mk Nat (Vec A) (plus (plus n m) o) (append A (plus n m) o (append A n m xs ys) zs))
+  =
+  let P = append_associates_motive A in
+  fun n m o ->
+    match n return fun (n : Nat) -> Pi (xs : Vec A n)(ys : Vec A m)(zs : Vec A o), P n m o xs ys zs with
+    | zero -> (fun xs ys zs -> 
+      match xs return fun (xs : Unit) -> P zero m o xs ys zs with
+      | tt -> refl (DPair Nat (Vec A)) (Prelude.DPair.mk Nat (Vec A) (plus m o) (append A m o ys zs)))
+    | succ n0 -> fun xs ys zs ->
+      match xs return fun (xs : Pair A (Vec A n0)) -> P (succ n0) m o xs ys zs with
+      | mk x xs0 ->
+          let ih = append_associates A n0 m o xs0 ys zs in
+          let f = fun (xy : DPair Nat (Vec A)) -> match xy return fun (_ : DPair Nat (Vec A)) -> DPair Nat (Vec A) with
+            | mk n xs -> Prelude.DPair.mk Nat (Vec A) (succ n) (Prelude.Pair.mk A (Vec A n) x xs)
+          in cong
+            (DPair Nat (Vec A))
+            (DPair Nat (Vec A))
+            (Prelude.DPair.mk Nat (Vec A) (plus n0 (plus m o)) (append A n0 (plus m o) xs0 (append A m o ys zs)))
+            (Prelude.DPair.mk Nat (Vec A) (plus (plus n0 m) o) (append A (plus n0 m) o (append A n0 m xs0 ys) zs))
+            f ih
+
+  

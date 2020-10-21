@@ -1,0 +1,50 @@
+module Eqvec
+
+import Nat
+import Prelude
+
+data Vec (A : Type)(n : Nat)
+| nil : Id Nat n zero -> Vec A n
+| cons : Pi 0 m : Nat, A -o Vec A m -o Id Nat n (succ m) -> Vec A n
+
+def nil0(A : Type): Vec A zero =
+  nil A zero (refl Nat zero)
+def cons0(A : Type)(0 n : Nat)(1 x : A)(1 xs : Vec A n): Vec A (succ n) =
+  cons A (succ n) n x xs (refl Nat (succ n))
+
+data Fin(n : Nat)
+| fzero : Pi 0 m : Nat, Id Nat n (succ m) -> Fin n
+| fsucc : Pi 0 m : Nat, Fin m -o Id Nat n (succ m) -> Fin n
+
+def fin_zero_empty(x : Fin zero): Void =
+  let f (0 m : Nat)(eq : Id Nat zero (succ m)): Void =
+    eq (fun x -> match x with | zero -> Unit | succ _ -> Void) tt
+  in
+  match x with
+  | fzero m eq -> f m eq
+  | fsucc m _ eq -> f m eq
+
+def nth (0 A : Type)(0 n : Nat)(xs : Vec A n)(i : Fin n): A =
+  match xs with
+  | nil eq0 -> (match0 fin_zero_empty (eq0 Fin i) with)
+  | cons m0 x xs eq0 -> match i with
+    | fzero m1 eq1 -> x
+    | fsucc m1 i eq1 ->
+      nth A m0 xs (nat_eq_pred m1 m0 (trans Nat (succ m1) n (succ m0) (sym Nat n (succ m1) eq1) eq0) Fin i)
+
+def zipWith(0 A B C : Type)(f : A -o B -o C)(0 n : Nat)(1 xs : Vec A n): Vec B n -o Vec C n =
+  match1 xs with
+  | nil eq0 -> (fun ys -> match1 ys with
+    | nil eq1 -> nil C n eq1
+    | cons m1 y ys eq1 ->
+      (match eq0 (fun x -> Id Nat x (succ m1)) eq1 (fun x -> match x with | zero -> Unit | succ _ -> Void) tt
+       return fun (x : Void) -> B -o Vec B m1 -o Vec C n
+       with) y ys)
+  | cons m0 x xs eq0 -> (fun ys -> match1 ys with
+    | nil eq1 ->
+      (match eq1 (fun x -> Id Nat x (succ m0)) eq0 (fun x -> match x with | zero -> Unit | succ _ -> Void) tt
+       return fun (x : Void) -> A -o Vec A m0 -o Vec C n
+       with) x xs
+    | cons m1 y ys eq1 ->
+      let ys0 = (nat_eq_pred m1 m0 (eq1 (fun x -> Id Nat x (succ m0)) eq0)) (Vec B) ys in
+      cons C n m0 (f x y) (zipWith A B C f m0 xs ys0) eq0)

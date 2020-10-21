@@ -27,6 +27,9 @@ def foldl (0 A B : Type)(f : A -o B -o B)(1 acc : B)(1 xs : List A): B =
 def reverse(0 A : Type): List A -o List A =
   foldl A (List A) (cons A) (nil A)
 
+def map (0 A B : Type)(f : A -o B)(1 xs : List A): List B =
+  foldr A (List B) (fun x acc -> cons B (f x) acc) (nil B) xs
+
 def length(0 A : Type)(xs : List A): Nat =
   match xs with
   | nil -> zero
@@ -34,6 +37,23 @@ def length(0 A : Type)(xs : List A): Nat =
 
 def append(0 A : Type)(1 xs : List A)(1 ys : List A): List A =
   foldr A (List A) (cons A) ys xs
+
+def append_map(A B : Type)(f : A -o B)(xs ys : List A):
+  Id (List B) (append B (map A B f xs)(map A B f ys))
+              (map A B f (append A xs ys))
+  =
+    match xs return fun (xs : List A) -> Id (List B) (append B (map A B f xs)(map A B f ys)) (map A B f (append A xs ys)) with
+    | nil -> refl (List B) (map A B f ys)
+    | cons x xs0 ->
+      let ih : Id (List B) 
+              (append B (map A B f xs0) (map A B f ys))
+              (map A B f (append A xs0 ys))
+             = append_map A B f xs0 ys in
+        cong (List B) (List B) 
+          (append B (map A B f xs0) (map A B f ys))
+          (map A B f (append A xs0 ys))
+          (cons B (f x))
+          ih
 
 def nth (0 A : Type)(n : Nat)(xs : List A): Less n (length A xs) => A =
   match xs return fun (zs : List A) -> Less n (length A zs) => A with
