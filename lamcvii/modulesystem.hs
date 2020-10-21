@@ -12,18 +12,22 @@ import Lexer(Loc)
 import Parser
 import qualified Core as C
 import Core
-
--- names are fully qualified, including the module where they are defined
+import Debug.Trace
 
 checkModules :: [Module] -> Either String String
-checkModules [] = pure []
-checkModules (mod:mods) = case checkModule mod [] (mods, Data.Map.empty, emptyObjects, 0) of
+checkModules mods = case checkProgram (mods, Data.Map.empty, emptyObjects, 0) of
   Left err -> Left (show err)
   Right (_,global_names,obs,_) -> pure (showGlobalNames obs global_names)
 
+checkProgram :: ([Module],GlobalNames,Objects,Int) -> Either Error ([Module],GlobalNames, Objects,Int)
+checkProgram (glob @ ([], _,_,_)) = pure glob
+checkProgram (mod:mods, names, obs, fresh) =
+  checkModule mod [] (mods, names, obs, fresh) >>= checkProgram
 
 checkModule :: Module -> [String] -> ([Module],GlobalNames,Objects,Int) -> Either Error ([Module],GlobalNames, Objects,Int)
 checkModule (mod_name,imports,decls) in_progress globnobs = do
+  --trace (show mod_name ++ " " ++ show in_progress ++ "\n") (pure ())
+
   let circularities = Data.List.intersect imports (mod_name : in_progress)
       
       checkCircularities
@@ -52,9 +56,5 @@ checkModule (mod_name,imports,decls) in_progress globnobs = do
         globalObjects = objects}
   
   st' <- foldM checkDecl st decls
-
-  let globnobs unverified = (unverified, Data.Map.insert mod_name (internalNames st') global_names, globalObjects st', newName st')
   
-  case unverified' of
-    [] -> pure (globnobs [])
-    mod : unverified -> checkModule mod in_progress (globnobs unverified)
+  pure (unverified', Data.Map.insert mod_name (internalNames st') global_names, globalObjects st', newName st')

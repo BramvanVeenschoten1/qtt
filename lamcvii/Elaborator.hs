@@ -79,9 +79,9 @@ instance Functor Result where
 instance Applicative Result where
   pure = Clear
   
-  (TypeError err) <*> x = TypeError err
-  (Clear f) <*> x = fmap f x
-  (Ambiguous n i fs) <*> x = Ambiguous n i (fmap (\(n,f) -> (n, f <*> x)) fs)
+  TypeError err <*> x = TypeError err
+  Clear f <*> x = fmap f x
+  Ambiguous n i fs <*> x = Ambiguous n i (fmap (\(n,f) -> (n, f <*> x)) fs)
   
 instance Alternative Result where
   empty = TypeError (error "empty result")

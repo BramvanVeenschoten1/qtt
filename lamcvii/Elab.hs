@@ -1,13 +1,12 @@
 module Elab where
 
-import Core as C
+import qualified Core as C
 
-import Prelude hiding (lookup)
-import Data.List hiding (lookup, insert)
+import Data.List
 import Control.Monad
 import Control.Applicative hiding (Const)
 import Data.Functor
-import Data.Map
+import Data.Map hiding (foldr)
 import Data.Either
 import Data.Maybe
 
@@ -15,109 +14,12 @@ import Lexer(Loc)
 import Parser(Binder)
 import Normalization
 import Substitution
-import Typechecker
+import Iterator
 import Multiplicity
 import Parser
-import Core(Term(..), Context)
+import Core hiding (Branch,Inductive)
 import Elaborator
 import Prettyprint
-
-{-
-
-  are metavariables well-typed on creation?
-
-  new elaboration algorithm:
-    - separate passes for type checking and multiplicity checking
-    - produces a Result of proof states, with constraints, metavariables, guarded constants
-    - maybe give up on disambiguation for a temporarily simple implementation
-    
-  On guarded constants:
-  Take the context:
-  P : Type -> Type
-  f : Pi A : Type, P A -> P A
-  x : B
-  then the term:
-  f _ x
-  produces a metavariable a : Type
-  and x is replaced by the guarded constant
-  X : P a = x when P a = B
-  
-  idris/matita solution:
-    equip metavariables with context
-  agdalean solution:
-    apply meta to variables in context, only instantiate with closed terms.
-    This means more meta-variables as functions, which need to be solved appropriately
-    One such instance we would like to be inferable is the motive in the case principle of
-    booleans:
-    
-    let bool_case (P : bool -> Type)(b : Bool)(pt : P true)(pf : P false): P b =
-      match b return _ with
-      | true -> pt
-      | false -> pf
-
-    the _ in the motive will create a new metavariable a applied to the variables in the context,
-    like so:
-    
-    a P b pt pf
-  
-    checking the motive against the expected return type produces the constraint:
-    a P b pt pf b = P b
-    checking the branches produces the constraints:
-    a P b pt pf true = P true
-    a P b pt pf false = P false
-    all solvable with
-    a P b pt pf = P
-    we cant instantiate a with fun _ _ _ _ -> P because this term isn't closed.
-    We can decide  however, since P is among a's arguments (being in the context),
-    we can instantiate a with fun P _ _ _ -> P
-  
-  metavariables implementation is quickly crystalizing in my head
-  core is polluted with:
-    - metavariables, needing no context due to being applied to it.
-    - guarded constants, with a type, value and set of constraints
-  a final checker should ensure absense of meta's and guards as well as well-typedness of
-  fully elaborated terms
-    
-  the elaboration algorithm is still bidirectional, inserting meta's where info is missing
-  
-  it will need to carry around:
-    - substitution for meta's
-    - constraints and the info they depend on
-    
-  on instantiation of meta's
-    - multiplicities need to be considered, but meta's are instantiated with simple terms,
-      so the should be inferrable from the bodies
-    - get a grip on inferable arguments, from trivial:
-        id _ 5
-      or
-        (fun x -> x) 5
-      to inferring non-dependent motives:
-        match b with | true -> false | false -> true
-      to simple motives:
-        (P : Bool -> Type)
-        (pt : P true)
-        (pf : P false)
-        (b : Bool)
-        match b with | true -> pt | false -> pf
-      the latter is non-trivial, but solvable by picking the simplest solution to the first constraint
-      motive inference becomes less important with equations though
-   
-  on disambiguation
-  it won't do to have a search space tree only cropped at the end to blame ambiguous names for
-  any error, so an appropriate data structure must be devised, satisfying the following properties:
-  - once the possibilities for a name have been reduced to 1 at a certain point,
-    it cannot receive blame for errors at a later point
-  - when the search space is empty the guilty set of ambiguities receives blame
-    errors are printed for each possible interpretation
-  - when the search space is open after elaboration, the guilty set of ambiguities receives blame
-    a list of possible candidates is given
-  The search space must be pruned after each constraint, so that 'solved' ambiguities are
-  removed from consideration.
-  
-  in short, the elaboration algorithm should take an open term and a proof state,
-  and should return a range of possible approximated terms and their proof states updated with the 
-  new constraints
--}
 
 {- here we typecheck the abstract syntax tree (AST),
    using a basic bidirectional checking algorithm,
@@ -211,147 +113,168 @@ checkArgMult loc One uses = checkOne uses where
     then pure (or uses)
     else TypeError (IntersectUse loc')
 
--- find the correct constructor ids for given names
-identifyBranch :: ElabState -> Binder -> C.Reference -> Elab Int
-identifyBranch glob bind (ref @ (IndRef obj_id defno)) =
-  let name = binderName bind
-      loc  = binderLoc bind in
-    case lookupName name glob of
-      Nothing -> err (show (binderLoc bind) ++ "constructor name not found: " ++ name)
-      Just qnames -> let
-          refs = mapM (\qname -> case lookupQName qname glob of
-            Nothing -> err (show loc ++ "name not present: " ++ showQName qname)
-            Just name -> pure name) qnames
+{-
+Given the ast for some branches, identify the constructors and/or default case that are covered.
+The last case of a match may be default if it has no arguments and its name is not a constructor name.
+-}
+identifyBranches :: ElabState -> Context -> Int -> Int -> [Branch] -> Elab ([(Int,Branch)], [String], Maybe Branch)
+identifyBranches glob ctx obj_id defno = f where
+        
+  g (_,ConRef obj_id' defno' constrno _) acc
+    | obj_id == obj_id' && defno == defno' = pure constrno
+  g _ acc = acc
 
-          g ((_,ConRef obj_id' defno' constrno _): _)
-            | obj_id == obj_id' && defno == defno' = pure constrno
-          g (_:xs) = g xs
-          g _ = TypeError (InvalidConstructor bind ref)
-        in refs >>= g
+  f [] = pure ([],[],Nothing)
+  f ((branch @ (loc,ctor_binder,ctor_args,rhs)) : xs) = do
+    let ctor_name = binderName ctor_binder
+        ctor_loc  = binderLoc ctor_binder
 
--- check if every constructor of the inductive type is handled in a match expression
--- needs update for default cases
-checkCovering :: Loc -> Int -> Int -> Int -> [Int] -> Elab ()
-checkCovering loc obj_id defno ctor_count = f 0 where
-  f n []
-    | n == ctor_count = pure ()
-  f n (m:ms)
-    | m == n = f (n + 1) ms
-  f n _ = TypeError (MissingCase loc (ConRef obj_id defno n undefined))
+        refs = fmap (fmap (fromJust . flip lookupQName glob)) (lookupName ctor_name glob)
+        
+    (found_branches, found_ctors, default_branch) <- identifyBranches glob ctx obj_id defno xs
+    
+    if elem ctor_name found_ctors
+    then TypeError (Msg (show loc ++ "duplicate cases in match expression"))
+    else pure ()
+        
+    case refs >>= foldr g Nothing of
+      Just id -> pure ((id,branch) : found_branches, ctor_name : found_ctors, default_branch)
+      Nothing ->
+        if Prelude.null xs && Prelude.null ctor_args
+        then pure ([], [], Just branch)
+        else TypeError (Msg (show loc ++ "'" ++ ctor_name ++ "' is not a constructor name of this type"))
 
-checkBranch :: ElabState -> Context -> Mult -> Term -> [Term] -> Int -> Int -> Int -> Int -> Term -> (Binder, [Binder], Expr) -> Elab (Term,Uses)
-checkBranch glob ctx mult motive params obj_id defno pno ctorno ctor_ty (bind,args,expr) = do
-  let
-    ctorname = binderName bind
+-- check a match expression against a given motive
+checkMatch ::  ElabState -> Context -> Loc -> Mult -> Expr -> Term -> [Branch] -> Elab (Term,Term,Uses)
+checkMatch glob ctx loc mult scrutinee motive branches = do
+  let obs = globalObjects glob
   
-    -- drop the first n domains of a nested pi-type, to instantiate it with the inductive parameters
-    drop_domains 0 tb = tb
-    drop_domains n (Pi _ _ _ tb) = drop_domains (n - 1) tb
-
-    -- specialize the type of the constructor with the inductive parameters
-    instantiated_ctor_ty = psubst (reverse params) (drop_domains (length params) ctor_ty)
-    
-    -- compute the types and multiplicities of the arguments of the specialized constructor
-    unroll (Pi m _ ta tb) (mults,tys) = unroll tb (times mult m : mults, ta : tys)
-    unroll tb acc = acc
-    
-    (mults,arg_tys) = unroll instantiated_ctor_ty mempty
-    
-    -- number of arguments in the AST
-    given_arity = length args
-    
-    -- source locations and names of arguments in the AST
-    (arg_locs,arg_names) = unzip (fmap (\b -> (binderLoc b, binderName b)) (reverse args))
-    
-    -- actual number of arguments of the constructor, modulo parameters
-    expected_arity = length arg_tys
-    
-    -- associate the names in the AST with the types of the arguments
-    update = zipWith (\name ty -> Hypothesis name ty Nothing) arg_names arg_tys
-    
-    ctx' = update ++ ctx
-    
-    count_down n
-      | n > 0 = Var (n - 1) : count_down (n - 1)
-      | otherwise = []
+  (eliminee,elim_ty,elim_uses) <- synth glob ctx scrutinee
+  
+  (obj_id,defno,indparams) <- case whd obs ctx elim_ty of
+    App (Const _ (IndRef obj_id defno _)) args -> pure (obj_id,defno,args)
+    Const _ (IndRef obj_id defno _) -> pure (obj_id,defno,[])
+    _ -> err (
+      show loc ++
+      showContext ctx ++
+      "\n expected a term of some inductive type, but the expression:\n" ++
+      showTerm ctx eliminee ++
+      "\n is of type:\n" ++
+      showTerm ctx elim_ty)
+  
+  (branch_list, _, default_branch) <- identifyBranches glob ctx obj_id defno branches
+  
+  let C.Inductive {paramno = pno, introRules = ctors} =
+        maybe (error "2") id (Data.Map.lookup obj_id (globalInd (globalObjects glob))) !! defno
       
-    -- constructor applied to the inductive parameters and the just now introduced arguments, needed to compute the return type
-    applied_ctor = App (Const ctorname (ConRef obj_id defno ctorno pno)) ((fmap (lift expected_arity) params) ++ count_down expected_arity)
-    
-    expected_branch_ty = App (lift expected_arity motive) [applied_ctor]
-  
-  if given_arity == expected_arity
-  then pure ()
-  else TypeError (ConstructorArity (binderLoc bind) (IndRef obj_id defno))
-  
-  (branch,uses) <- check glob ctx' expr expected_branch_ty
-  
-  let (arg_uses, uses') = Data.List.splitAt expected_arity uses
-  
-      abstract_branch = Data.List.foldl (\acc (m,n,t) -> Lam m n t acc)
-  
-  sequence_ (zipWith3 checkArgMult arg_locs mults arg_uses)
-  
-  pure (abstract_branch branch ((zip3 mults arg_names arg_tys)), uses')
+      (ctor_names,ctor_arities,ctor_tys) = unzip3 ctors
 
--- check a match expression with a given motive
-checkMatch :: ElabState -> Context -> Loc -> Mult -> Expr -> Term -> [(Binder,[Binder],Expr)] -> Elab (Term,Term,Uses)
-checkMatch glob ctx loc mult scrutinee motive cases = do
-  (scrutinee',inty,uterm) <- synth glob ctx scrutinee
-  
-  case mult of
-    Zero -> if length cases > 1
-      then err (show loc ++ "\n erased match may have at most one branch")
-      else pure ()
-    _ -> pure ()
-  
-  let
-    getElimineeType :: Objects -> Context -> Loc -> Term -> Term -> Elab (Reference,[Term])
-    getElimineeType glob ctx loc e t = case whd glob ctx t of
-      App (Const _ (ref @ (IndRef _ _))) args -> pure (ref,args)
-      Const _ (ref @ (IndRef _ _ )) -> pure (ref,[])
-      _ -> err (show loc ++ showContext ctx ++ "\n expected a term of some inductive type, but the expression:\n" ++ showTerm ctx e ++ "\n is of type:\n" ++ showTerm ctx t) 
-
-  -- get the inductive type reference and the parameters from the scrutinee
-  (indref,indparams) <- getElimineeType (globalObjects glob) ctx (exprLoc scrutinee) scrutinee' inty
+      checkBranch :: Int -> Term -> Elab ((Bool, Term), Uses)
+      checkBranch ctorno ctor_ty = do
+        let
+          ctor_name = ctor_names !! ctorno
+        
+          instantiated_ctor_ty = instantiateCtor indparams ctor_ty
+          
+          unroll :: Term -> ([Mult],[Term]) -> ([Mult],[Term])
+          unroll (Pi m _ ta tb) (mults, tys) = unroll tb (times mult m : mults, ta : tys)
+          unroll tb acc = acc
+          
+          (mults,arg_tys) = unroll instantiated_ctor_ty mempty
+          
+          ctor_arity = length arg_tys
+          
+          countDown n
+            | n > 0 = Var (n - 1) : countDown (n - 1)
+            | otherwise = []
+          
+          applied_ctor = App (Const ctor_name (ConRef obj_id defno ctorno pno)) (fmap (lift ctor_arity) indparams ++ countDown ctor_arity)
+          
+          expected_branch_ty = App (lift ctor_arity motive) [applied_ctor]
+          
+        case Data.List.lookup ctorno branch_list of
+          Nothing -> case default_branch of
+            Nothing -> err (show loc ++ " match does not cover all cases")
+            Just (loc,arg,[],rhs) -> do
+              let
+                {-
+                  what to do instead: 
+                  - lambda-abstract over the subdata
+                  - reconstruct the eliminee
+                  - put the eliminee in context
+                  - check default branch
+                  - build as let-expression
+                -}
+                arg_name = binderName arg
+              
+                update = fmap (\ty -> Hypothesis "$" ty Nothing) arg_tys
+                
+                reconstructed_eliminee =
+                  App
+                    (Const "" (ConRef obj_id defno ctorno (length indparams)))
+                    (indparams ++ countDown ctor_arity)
+                
+                ctx' = Hypothesis arg_name elim_ty (Just reconstructed_eliminee) : (update ++ ctx)
+                
+              (rhs,uses) <- check glob ctx' rhs expected_branch_ty
+              
+              let elim_uses : uses' = uses
+                  uses'' = Data.List.drop ctor_arity uses'
+                  
+                  arg_uses = fmap (\m -> Oneuse m loc) mults
+                  
+                  env = zip3 mults (repeat "$") arg_tys
+                  
+                  rhs' = Let arg_name elim_ty reconstructed_eliminee rhs
+                  
+                  branch_rhs = Data.List.foldl (\acc (m,n,t) -> Lam m n t acc) rhs' env
     
-  let -- number of parameters
-      pno = length indparams
-      
-      -- destruct reference,
-      IndRef obj_id defno = indref
-      
-      -- get definition
-      Just ind_block = Data.Map.lookup obj_id (globalInd (globalObjects glob))
-      inddef = ind_block !! defno
-      
-      -- get constructor types
-      ctor_types = introRules inddef
+              sequence_ (zipWith3 checkArgMult (repeat loc) mults arg_uses)
+              
+              pure ((False,branch_rhs), uses')
+
+          Just (loc,ctor_binder,args,rhs) -> do
+            let
+              given_arity = length args
+              
+              (arg_locs,arg_names) = unzip (fmap (\b -> (binderLoc b, binderName b)) (reverse args))
+              
+              update = zipWith (\name ty -> Hypothesis name ty Nothing) arg_names arg_tys
+              
+              ctx' = update ++ ctx
+            
+            if given_arity == ctor_arity
+            then pure ()
+            else err (show loc ++ "expected " ++ show ctor_arity ++ " arguments in case-expression, but got " ++ show given_arity)
+            
+            (rhs,uses) <- check glob ctx' rhs expected_branch_ty
+            
+            let
+              (args_uses, uses') = Data.List.splitAt ctor_arity uses
   
-  -- from the obj_ids of the cases, find out which case belongs to which constructor
-  branch_ids <- mapM (\(x,_,_) -> identifyBranch glob x indref) cases
+              env = zip3 mults arg_names arg_tys
+          
+              branch_rhs = Data.List.foldl (\acc (m,n,t) -> Lam m n t acc) rhs env
   
-  -- sort the branches to match the order of declarations of the constructors
-  let tagged_branches = zip branch_ids cases
-      (sorted_ids,sorted_branches) = unzip (sortOn fst tagged_branches)
+            sequence_ (zipWith3 checkArgMult arg_locs mults args_uses)
+            
+            pure ((False,branch_rhs), uses')
+
+  (branches, uses) <- fmap unzip (zipWithM checkBranch [0..] ctor_tys)
   
-  -- check if each constructor is accounted for
-  checkCovering loc obj_id defno (length ctor_types) sorted_ids
+  let result_type = App motive [eliminee]
   
-  -- check the branches
-  bruses <- sequence (zipWith3 (checkBranch glob ctx mult motive indparams obj_id defno pno) [0..] ctor_types sorted_branches)
-  
-  let (branches,usess) = unzip bruses
-      uses = branchUses loc usess
-      result = CaseDistinction {
-        elimType = (obj_id,defno),
+      result = Case (CaseDistinction {
+        elimType = elim_ty,
         elimMult = mult,
-        eliminee = scrutinee',
-        motive = motive,
-        branches = branches}
-      result_type = App motive [scrutinee']
+        eliminee = eliminee,
+        motive   = motive,
+        branches = branches})
+      
+      result_uses = plusUses (timesUses mult elim_uses) (branchUses loc uses)
   
-  pure (Case result, result_type, plusUses (timesUses mult uterm) uses)
+  pure (result,result_type,result_uses)
+
 
 -- check or synthesise the binding of a let expression
 checkLetBinding :: ElabState -> Context -> Binder -> Maybe Expr -> Expr -> Elab (Term,Term,Uses)
@@ -396,7 +319,6 @@ synth glob ctx expr = case expr of
     (b,tb,ub0) <- synth glob (hyp : ctx) b
     let ux : ub = ub0
         u = useSum ux
-    -- substitute binder in return type?
     pure (Let name ta a b, subst a tb, plusUses (timesUses u ua) ub)
   ELambda loc _ _ Nothing _ -> err (show loc ++ showContext ctx ++ "\n\ncannot infer lambda")--TypeError (SynthLambda loc)
   ELambda loc m bind (Just ta) b -> do

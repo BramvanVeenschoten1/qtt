@@ -4,15 +4,6 @@ import Data.Map
 
 data Mult = Zero | One | Many deriving (Eq,Ord)
 
-instance Show Mult where
-  show Zero = "0"
-  show One  = "1"
-  show Many = "w"
-  
--- In the spirit of structuralism, objects have no intrinsic names,
--- so this string in the Const constructor is just the qualified name
--- in that context
-
 data Term
   = Box 
   | Star
@@ -24,26 +15,36 @@ data Term
   | Case  CaseDistinction
   | Const String Reference
 
+{-
+  the heigt of fixpoints and definitions indicate the length of chains of definitions
+  they depend upon and is used as a heuristic for reduction
+  
+  uniparamno for fixpoints and inductive types is highest the number of the first parameters that are
+  uniformly applied to recursive occurrences in the bodies/constructors and are used for
+  termination checking and positivity checking respectively
+  
+  recparamno for fixpoints indicates the argument that is supposed to decrease in each recursive call,
+  used to ensure termination in reduction
+  
+  the paramno of an inductive type refers to the highest number of the first parameters that are uniformly applied
+  in the *return types* of each constructor. This means the values of parameters are constant and can be inferred from the type of
+  the inductive object, so they don't need to be considered in pattern matching, the motive need not abstract over them and
+  they are not needed at runtime.
+-}
 data Reference
-  = IndRef  Int Int         -- name, defno
-  | FixRef  Int Int Int Int -- name, defno, recparamno, height
-  | ConRef  Int Int Int Int -- name, defno, constructor nr, paramno
-  | DefRef  Int Int         -- name, height
-  | DeclRef Int             -- name,
+  = IndRef  Int Int Int         -- obj_id, defno, uniparamno
+  | FixRef  Int Int Int Int Int -- obj_id, defno, recparamno, height, uniparamno
+  | ConRef  Int Int Int Int     -- obj_id, defno, constructor nr, paramno
+  | DefRef  Int Int             -- obj_id, height
+  | DeclRef Int                 -- obj_id,
   deriving (Eq,Ord,Show)
 
-data Branch = Branch {
-  ctorName  :: String,
-  isDefault :: Bool,
-  ctorArgs  :: [(Mult,String,Term)],
-  branchRhs :: Term}
-
 data CaseDistinction = CaseDistinction {
-  elimType :: (Int,Int),   -- type info of eliminee: obj_id, defno
-  elimMult :: Mult,        -- multiplicity of the eliminee
-  eliminee :: Term,        -- duh
-  motive   :: Term,        -- return type of the expression, abstracted over the eliminee
-  branches :: [Term]}      -- lambda abstracted branches are a thing now
+  elimType :: Term, -- type of eliminee
+  elimMult :: Mult, -- multiplicity of the eliminee
+  eliminee :: Term, -- the inductive object being inspected
+  motive   :: Term, -- return type of the expression, abstracted over the eliminee
+  branches :: [(Bool,Term)]}
 
 data Fixpoint = Fixpoint {
   fixType    :: Term,
@@ -52,7 +53,8 @@ data Fixpoint = Fixpoint {
 
 data Inductive = Inductive {
   indSort    :: Term,
-  introRules :: [Term]}
+  paramno    :: Int, -- is computable from unroll Pi
+  introRules :: [(String,Int,Term)]} -- [(name, paramno, ty)]
   
 type Definition = (Term,Term) -- type, body
 
@@ -70,3 +72,5 @@ data Hypothesis = Hypothesis {
   hypDef  :: Maybe Term}
 
 type Context = [Hypothesis]
+
+--fromJust' n = maybe (error (show n)) id

@@ -5,21 +5,10 @@ import Control.Applicative
 import Data.List
 import Data.Function
 import Data.Array.Unboxed
+import Data.Maybe
 
 -- replace mult by Maybe Int or sumthin
 import Core(Mult(..))
-
-{-
-TODO
-- add parameters for Pi
-- add annotations for arguments that are inferred, but relevant
-- adjust ast type for mult inference, and remove dependency on core
-- add equations
-- add destructuring let
-- add pattern-matching lambdas
-- add parametrized blocks
--}
-
 
 type Name = String
 type QName = [String]
@@ -45,6 +34,8 @@ type Function = (Loc, Binder, Expr, Expr)
 
 type Module = (String,[String],[Decl])
 
+type Branch = (Loc,Binder,[Binder],Expr)
+
 data Decl 
   = Inductive [Inductive]
   | Definition [Function]
@@ -60,7 +51,7 @@ data Expr
   | ELambda Loc Mult Binder (Maybe Expr) Expr
   | EPi     Loc Mult (Maybe Binder) Expr Expr
   | ELetRec Loc [Function] Expr
-  | EMatch  Loc Mult Expr (Maybe Expr) [(Binder,[Binder],Expr)]
+  | EMatch  Loc Mult Expr (Maybe Expr) [Branch]
 
 showArrow Zero = " => "
 showArrow One  = " -o "
@@ -88,7 +79,7 @@ primary = do
     Symbol x     -> qname begin x
     Pct "_"      -> pure (EHole span)
     Pct "Type"   -> pure (EType span)
-    Pct "Pi"     -> quant begin
+    Pct "Pi"     -> parseProduct begin
     Pct "match0" -> match Zero begin
     Pct "match1" -> match One  begin
     Pct "match"  -> match Many begin
@@ -136,22 +127,22 @@ annot = do
     Pct ":" -> token *> fmap Just expr
     _ -> pure Nothing
 
-annotParam :: String -> Parser [Param]
-annotParam close = do
+annotParam :: Parser [Param]
+annotParam = do
   m <- mult
   bs <- some (mkBinder <$> spanned (expectSymbol "name in parameter list"))
   ty <- annot
-  expect close ("closing '" ++ close ++ "' after parameter")
   pure (fmap (\b -> (m,b,ty)) bs)
 
 param :: Parser [Param]
 param = do
-  (span,t) <- spanned token
+  t <- peek token
   case t of
-    Symbol x -> pure [(Many, mkBinder (span, x), Nothing)]
-    Pct "(" -> annotParam ")"
-    Pct "{" -> annotParam "}"    
-      
+    Pct "(" -> token *> annotParam <* f ")"
+    Pct "{" -> token *> annotParam <* f "}"
+    _ -> annotParam
+  where f close = expect close ("closing '" ++ close ++ "' after parameter")
+
 params :: Parser [Param]
 params = do
   t <- peek token
@@ -174,17 +165,18 @@ lam begin = do
   let f (m,v,ta) = ELambda span m v ta
   pure (foldr f body ps)
 
-quant :: Cursor -> Parser Expr
-quant begin = do
-  m <- mult
-  v <- mkBinder <$> spanned (expectSymbol "parameter in dependent product type")
-  expect ":" "':' after variable in dependent product type"
-  ta <- expr
-  expect "," "',' after binder in dependent product type"
-  tb <- expr
+parseProduct :: Cursor -> Parser Expr
+parseProduct begin = do
+  ps <- someParams
+  expect "," "',' after params in Pi expression"
+  body <- expr
   end <- getCursor
   span <- makeLoc begin end
-  pure (EPi span m (Just v) ta tb)
+  if all (\(_,_,ta) -> isJust ta) ps
+  then pure ()
+  else err2 span "parameters in Pi expressions must have type annotations"
+  let f (m,v,Just ta) = EPi span m (Just v) ta
+  pure (foldr f body ps)
 
 pattern :: Parser (Binder,[Binder])
 pattern = (,) <$> ctor <*> many args where
@@ -210,16 +202,19 @@ match m begin = do
   pure (EMatch span m scrutinee motive a)
   where
     arms = do
+      begin <- getCursor
       t <- peek token
       case t of
-        Pct "|" -> token *> arm
+        Pct "|" -> token *> arm begin
         _       -> pure []
-    arm = do
+    arm begin = do
       (ctor,args) <- pattern
       expect "->" "'->' after pattern in match-arm"
       e <- expr
+      end <- getCursor
+      span <- makeLoc begin end
       xs <- arms
-      pure ((ctor,args,e):xs)
+      pure ((span,ctor,args,e):xs)
 
 app :: Parser Expr
 app = do

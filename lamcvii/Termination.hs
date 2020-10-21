@@ -15,16 +15,13 @@ import Iterator
 import Normalization
 import Substitution
 import Parser
-import Typechecker
 import Multiplicity
 import Lexer(Loc)
 import Prettyprint
+import Debug.Trace
 
 {-
-  Things to add:
-  - nested calls to Defs
-  - nested calls to Fix
-  - decent error messages
+  nested function calls will be handled in getRecursiveCalls
 -}
 
 data Subdata
@@ -33,23 +30,47 @@ data Subdata
   | Sub Int -- a term smaller than an argument and the number of said argument
   | Other -- a variable that is neither recursive nor smaller
 
-type RecCall = (Int,[Maybe Int]) -- callee defno, (caller argno, callee argno)
+-- information on which debruijn indices are possibly recursive arguments
+-- with regular inference, all top-level lambda arguments are possibly recursive
+-- with nested inference, the recursive argument is already known
+data RecArg
+  = Past
+  | Unknown Int
+  | Known Int Int Int
+
+argSucc :: RecArg -> RecArg
+argSucc Past = Past
+argSucc (Unknown x) = Unknown (x + 1)
+argSucc (Known x recpno unipno) = Known (x + 1) recpno unipno
+
+isRecArg :: RecArg -> Subdata
+isRecArg Past = Other
+isRecArg (Unknown x) = Seed x
+isRecArg (Known x recpno unipno)
+  | x == recpno - unipno = Seed recpno
+  | otherwise = Other
+
+type RecCall = (Int,[Maybe Int]) -- callee defno, [(caller argno, callee argno)]
 
 {-
   returns a list of recursive calls, with for each callee argument whether it is a subdatum and
   which caller argument it is derived from if so
 -}
 getRecursiveCalls :: Objects -> Context -> Term -> [RecCall]
-getRecursiveCalls glob ctx = getRecCalls ctx (fmap Recursive [0 .. length ctx - 1]) (Just 0) where
+getRecursiveCalls glob ctx = getRecCalls ctx (fmap Recursive [0 .. length ctx - 1]) (Unknown 0) where
   -- find if a term is a seed or smaller than a seed, returns argument number if so
-  isSeed :: Context -> [Subdata] -> Term -> Maybe Int
+  isSeed :: Context -> [Subdata] -> Term -> Subdata
   isSeed ctx subs t = case whd glob ctx t of
-    Var n -> case subs !! n of
-      Seed m -> Just m
-      Sub m -> Just m
-      _ -> Nothing
+    Var n -> subs !! n
     App f x -> isSeed ctx subs f
-    _ -> Nothing
+    _ -> Other
+  
+  -- check whether some match branches are all subterms of some seed
+  isCaseSmaller :: [Maybe Int] -> Maybe Int
+  isCaseSmaller [] = Nothing
+  isCaseSmaller (Just n : xs)
+    | all (\x -> (==) (Just n) x) xs = Just n
+    | otherwise = Nothing
   
   -- find if a term is smaller and if so, return argument number
   isSmaller :: Context -> [Subdata] -> Term -> Maybe Int
@@ -58,23 +79,45 @@ getRecursiveCalls glob ctx = getRecCalls ctx (fmap Recursive [0 .. length ctx - 
       Sub m -> Just m
       _ -> Nothing
     App f x -> isSmaller ctx subs f
+    Case dat -> isCaseSmaller (fmap (isSmaller ctx subs . snd) (branches dat))
     _ -> Nothing
   
   -- check whether a term returns an inductive type
   returnsInductive ctx ta = case whd glob ctx ta of
     Pi _ name ta tb -> returnsInductive (Hypothesis name ta Nothing : ctx) tb
     App fun _ -> returnsInductive ctx fun
-    Const _ (IndRef _ _) -> True
+    Const _ (IndRef _ _ _) -> True
     _ -> False
   
   -- traverse the body of a fixpoint function and gather recursive path information
-  getRecCalls :: Context -> [Subdata] -> Maybe Int -> Term -> [RecCall]
+  getRecCalls :: Context -> [Subdata] -> RecArg -> Term -> [RecCall]
   getRecCalls ctx subs argc t = case whd glob ctx t of
     Var n -> case subs !! n of
       Recursive defno -> [(defno,[])]
       _ -> []
+    App (Const _ (FixRef obj_id defno recparamno height uniparamno)) args -> let
+      (left_args,right_args) = Data.List.splitAt uniparamno args
+      left_calls = concatMap (getRecCalls ctx subs Past) left_args
+      right_calls = concatMap (getRecCalls ctx subs Past) right_args
+      
+      fix_bodies = fmap fixBody (fromJust (Data.Map.lookup obj_id (globalFix glob)))
+      
+      dummy_bodies = fmap (substWithDummy obj_id) fix_bodies
+      
+      applied_bodies = fmap (\fun -> App fun left_args) dummy_bodies
+      
+      expand = Data.List.concatMap (getRecCalls ctx subs (Known 0 recparamno uniparamno)) applied_bodies 
+      
+      traceExpand = trace (
+        show (fmap (showTerm ctx) dummy_bodies) ++ "\n" ++
+        show (fmap (showTerm ctx . whd glob ctx) applied_bodies) ++ "\n" ++
+        show expand ++ "\n") expand
+      
+      in if Prelude.null left_calls
+        then right_calls
+        else traceExpand ++ right_calls
     App fun args -> let
-      arg_calls = concatMap (getRecCalls ctx subs Nothing) args
+      arg_calls = concatMap (getRecCalls ctx subs Past) args
       in case fun of
         Var n -> case subs !! n of
           Recursive defno -> let
@@ -82,22 +125,20 @@ getRecursiveCalls glob ctx = getRecCalls ctx (fmap Recursive [0 .. length ctx - 
             in (defno, small_args) : arg_calls
           _ -> arg_calls
         _ -> arg_calls
-    Lam _ name ta b -> getRecCalls (Hypothesis name ta Nothing : ctx) ((maybe Other Seed argc) : subs) (fmap (+1) argc) b
-    Pi _ name ta tb -> getRecCalls (Hypothesis name ta Nothing : ctx) (Other : subs) Nothing tb
-    Let name ta a b -> getRecCalls (Hypothesis name ta (Just a) : ctx) (Other : subs) Nothing b
+    Lam _ name ta b -> getRecCalls (Hypothesis name ta Nothing : ctx) (isRecArg argc : subs) (argSucc argc) b
+    Let name ta a b -> getRecCalls (Hypothesis name ta (Just a) : ctx) (isRecArg argc : subs) (argSucc argc) b
+    Pi _ name ta tb -> getRecCalls (Hypothesis name ta Nothing : ctx) (Other : subs) Past tb
     Case distinct -> let
-      (obj_id,defno) = elimType distinct
+      (obj_id,defno) = case whd glob ctx (elimType distinct) of
+        App (Const _ (IndRef obj_id defno _)) _ -> (obj_id,defno)
+        Const _ (IndRef obj_id defno _) -> (obj_id,defno)
+        x -> error (showTerm ctx x)
       
       block = fromJust (Data.Map.lookup obj_id (globalInd glob))
       
       def = block !! defno
       
-      unrollProduct (Pi _ _ _ tb) = 1 + unrollProduct tb
-      unrollProduct _ = 0
-      
-      paramno = unrollProduct (indSort def)
-      
-      ctor_arities = fmap (\x -> unrollProduct x - paramno) (introRules def)
+      ctor_arities = fmap (\(_,x,_) -> x) (introRules def)
       
       elimineeIsSeed = isSeed ctx subs (eliminee distinct)
       
@@ -106,14 +147,51 @@ getRecursiveCalls glob ctx = getRecCalls ctx (fmap Recursive [0 .. length ctx - 
       unrollArgs ctx subs m (Lam _ name ta b) = let
         cont sub = unrollArgs (Hypothesis name ta Nothing : ctx) (sub : subs) (m - 1) b
         in case elimineeIsSeed of
-          Nothing -> cont Other
-          Just k ->
+          Other -> cont Other
+          Sub k ->
             if returnsInductive ctx ta
             then cont (Sub k)
             else cont Other
+          Seed k ->
+            if returnsInductive ctx ta
+            then cont (Sub k)
+            else cont Other
+          
+      regular_calls = concat (zipWith (unrollArgs ctx subs) ctor_arities (fmap snd (branches distinct)))
       
-      in concat (zipWith (unrollArgs ctx subs) ctor_arities (branches distinct))
+      
+      in regular_calls
     _ -> []
+
+{-
+  because it simplifies subsequent termination checks, improves reduction behaviour,
+  and subsumes the special case in Declaration.hs.
+
+  return list of non_recs and new rec_calls
+  
+  graph ordering between non-recursive calls is preserved in the list
+  
+  non-recursive bodies are filtered from the result list.
+ -}
+ 
+filterNonRecs :: [Int] -> [[RecCall]] -> ([Int],[[RecCall]])
+filterNonRecs non_recs rec_calls = let
+    tagged_rec_calls = zip [0..] rec_calls
+    
+    -- give the numbers of the definitions that do no recursive calls, if they haven't been shown to be non-recursive
+    -- in a previous iteration
+    isEmpty :: (Int,[RecCall]) -> [Int] -> [Int]
+    isEmpty (defno,calls) acc
+      | elem defno non_recs = acc
+      | Prelude.null calls = defno : acc
+      | otherwise = acc
+    
+    new_non_recs = Data.List.foldr isEmpty [] tagged_rec_calls
+    
+    new_rec_calls = fmap (Data.List.filter (\call -> not (elem (fst call) new_non_recs))) rec_calls
+  in if Prelude.null new_non_recs
+     then (non_recs, new_rec_calls)
+     else filterNonRecs (non_recs ++ new_non_recs) new_rec_calls
 
 
 {-
@@ -187,6 +265,6 @@ findRecparams rec_calls = let
       pick x = checkCalls defno x recparams *> solve (defno + 1) (recparams ++ [x])
       
       -- try every possibly allowed argument if necessary
-      in Data.List.foldr (<|>) Control.Applicative.empty (fmap pick allowed)
+      in Data.List.foldr (<|>) Nothing (fmap pick allowed)
   
   in solve 0 []

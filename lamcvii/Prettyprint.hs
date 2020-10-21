@@ -4,7 +4,7 @@ import Lexer(Loc)
 import Parser(Binder(..))
 import Core
 import Elaborator
-import Typechecker
+import Iterator
 
 import Data.Map
 import Data.List
@@ -18,7 +18,7 @@ instance Show Error where
     Ambiguity name loc qnames -> show loc ++ "Cannot infer suitable definition for " ++ name ++ ", candidates are: \n" ++ list_names qnames
     UnboundVar loc -> show loc ++ " unbound variable"
     
-    Nonterminating loc -> show loc ++ " non terminating fixpoint"
+    Nonterminating loc -> show loc ++ "cannot infer decreasing path for fixpoint"
     SynthLambda loc -> show loc ++ " cannot infer type of un-annotated lambda expression"
     SynthMatch loc -> show loc ++ " cannot infer type of match expression without motive"
     SynthParam loc -> show loc ++ " cannot infer type of an inductive parameter"
@@ -40,6 +40,10 @@ instance Show Error where
     
     x -> "not ok"
 
+instance Show Mult where
+  show Zero = " 0"
+  show One  = " 1"
+  show Many = ""
 
 showGlobalNames :: Objects -> GlobalNames -> String
 showGlobalNames obs = foldrWithKey (\key val acc -> "module " ++ key ++ "\n" ++ showNameSpace obs val ++ acc) ""
@@ -51,13 +55,14 @@ showTerm :: Context -> Term -> String
 showTerm ctx x = case x of
   Box -> "?"
   Star -> "Type"
-  Var n -> hypName (ctx !! n)
+  Var n -> maybe ("$" ++ show n) (\x -> if hypName x == "" then "$" ++ show n else hypName x) (nth n ctx) --(ctx !! n)
   
   App f xs ->
     ((case f of
       Lam _ _ _ _ -> embrace
       Case _ -> embrace
       Let _ _ _ _ -> embrace
+      App _ _ -> error "nested apps"
       _ -> id) (showTerm ctx f)) ++ " " ++
     (intercalate " " (fmap (\x -> (case x of
       App _ _ -> embrace
@@ -68,17 +73,28 @@ showTerm ctx x = case x of
       _ -> id) (showTerm ctx x)) xs))
   
   lam @ (Lam m s ta b) -> showLam 0 ctx lam
-  Pi  m s ta tb -> "Pi " ++ show m ++ " " ++ s ++ " : " ++ showTerm ctx ta ++ ", " ++ showTerm (push s ctx) tb
-  Let s ta a b -> "let " ++ s ++ " = " ++ showTerm ctx a ++ " in " ++ showTerm (push s ctx) b
-  Const x _ -> x
+  Pi m "" ta tb -> f (showTerm ctx ta) ++ showArrow m ++ showTerm (push "" ta ctx) tb where
+    f = case ta of
+      Pi _ _ _ _ -> embrace
+      _ -> id
+  Pi m s ta tb -> "Pi" ++ show m ++ " " ++ s ++ " : " ++ f (showTerm ctx ta) ++ ", " ++ showTerm (push s ta ctx) tb where
+    f = case ta of
+      Pi _ _ _ _ -> embrace
+      _ -> id
+  Let s ta a b -> "let " ++ s ++ " = " ++ showTerm ctx a ++ " in " ++ showTerm (push s ta ctx) b
+  Const x ref -> if Prelude.null x  then "(" ++ show ref ++ ")" else x
   
   -- will have to do without constructor names for now
-  Case distinct -> "match " ++ showTerm ctx (eliminee distinct) ++ " with" ++ showBranches ctx (branches distinct)
+  Case distinct -> "match " ++ showTerm ctx (eliminee distinct) ++ " with " ++
+    concat (fmap (showBranch ctx . snd) (branches distinct))
   where
-    push s ctx = Hypothesis s undefined undefined : ctx
+    push s t ctx = Hypothesis s t Nothing : ctx
     
-    showBranches ctx branches = concat (fmap (\branch -> " | " ++ 
-      (case branch of Case _ -> embrace; _ -> id) (showTerm ctx branch)) branches)
+    showArrow Zero = " => "
+    showArrow One  = " -o "
+    showArrow Many = " -> "
+    
+    showBranch ctx rhs = "| " ++ (case rhs of Case _ -> embrace; _ -> id) (showTerm ctx rhs)
     
     embrace x = "(" ++ x ++ ")"
     
@@ -90,7 +106,9 @@ showTerm ctx x = case x of
     
 showContext :: Context -> String
 showContext [] = ""
-showContext (hyp:ctx) = showContext ctx ++ "\n" ++ hypName hyp ++ " : " ++ showTerm ctx (hypType hyp)
+showContext (hyp:ctx) = showContext ctx ++ "\n" ++ hypName hyp ++ " : " ++ showTerm ctx (hypType hyp) ++ f (hypDef hyp) where
+  f Nothing = ""
+  f (Just x) = " = " ++ showTerm ctx x
 
 list_names names = intercalate "\n" (fmap showQName names)
 
