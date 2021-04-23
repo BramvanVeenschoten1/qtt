@@ -1,0 +1,15 @@
+module Unnested
+
+import Prelude
+
+data Not (A : Type)
+| mk : (A -> Void) -> Not A
+
+data Neg
+| mk : Not Neg -> Neg
+
+def No : Neg -> Void =
+  fun f -> match f with | mk g -> g f
+
+def Absurd : Void =
+  No (mk No)
