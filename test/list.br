@@ -57,7 +57,7 @@ def append_map(A B : Type)(f : A -o B)(xs ys : List A):
 
 def nth (0 A : Type)(n : Nat)(xs : List A): Less n (length A xs) => A =
   match xs return fun (zs : List A) -> Less n (length A zs) => A with
-  | nil -> fun le -> (match0 less_than_zero n le with)
+  | nil -> fun le -> (match0 less_than_zero n le Void with)
   | cons x xs -> match n return fun (m : Nat) -> Less m (succ (length A xs)) => A with
     | zero -> fun _ -> x
     | succ n -> nth A n xs
@@ -71,7 +71,12 @@ def append_length (0 A : Type)(xs ys : List A): Id Nat (plus (length A xs)(lengt
   | cons _ xs -> cong Nat Nat (plus (length A xs)(length A ys)) (length A (append A xs ys)) succ (append_length A xs ys)
 
 (* proof by induction principle *)
-def append_length2  (0 A : Type)(xs ys : List A): Id Nat (plus (length A xs)(length A ys)) (length A (append A xs ys)) =
+def append_length2
+    (0 A : Type)
+    (xs ys : List A):
+      Id Nat
+        (plus (length A xs)(length A ys))
+        (length A (append A xs ys)) =
   let len = length A in
   let app = append A in
   list_rec A

@@ -11,19 +11,21 @@ def nat_rec (0 P : Nat -> Type)(pz : P zero)(ps : Pi n : Nat, P n -> P (succ n))
   | zero -> pz
   | succ m -> ps m (nat_rec P pz ps m)
 
-def no_conf(n m : Nat): Type =
+def no_conf_t(n m : Nat): Type =
   match n with
   | zero -> (match m with
-    | zero -> Id Nat n m
-    | succ _ -> Void)
-  | succ _ -> (match m with
-    | zero -> Void
-    | succ _ -> Id Nat n m)
+    | zero -> Unit
+    | succ _ -> Bottom)
+  | succ n -> (match m with
+    | zero -> Bottom
+    | succ m -> Id Nat n m)
 
-def nat_case (0 P : Nat -> Type)(pz : P zero)(ps : Pi n : Nat, P (succ n))(n : Nat): P n =
-  match n return P with
-  | zero -> pz
-  | succ n -> ps n
+def no_conf(n m : Nat)(e : Id Nat n m): no_conf_t n m =
+  let no_conf_h (n : Nat): no_conf_t n n =
+    match n return fun (n : Nat) -> no_conf_t n n with
+    | zero -> tt
+    | succ n -> refl Nat n
+  in e (fun k -> no_conf_t n k) (no_conf_h n)
 
 def even (n : Nat) : Bool =
   match n with
@@ -96,11 +98,6 @@ def dec_eq(n m : Nat): NatEq n m => Id Nat n m =
 def dec_eq_inv(n m : Nat): Id Nat n m -> NatEq n m =
   fun eq -> eq (fun k -> NatEq n k) (NatRefl n)
 
-(* uniqueness of identity proofs for nat *)
-
-def elim_neq(0 n m : Nat)(0 eq : NatEq n m): Id Nat n m =
-  id_irrelevant Nat n m (dec_eq n m eq)
-
 def nat_uip(n m : Nat): Pi 0 x : NatEq n m, Pi 0 y : NatEq n m, Id (NatEq n m) x y =
   match n return fun (i : Nat) -> Pi 0 x : NatEq i m, Pi 0 y : NatEq i m, Id (NatEq i m) x y with
   | zero -> (match m return fun (j : Nat) -> Pi 0 x : NatEq zero j, Pi 0 y : NatEq zero j, Id (NatEq zero j) x y with
@@ -110,48 +107,49 @@ def nat_uip(n m : Nat): Pi 0 x : NatEq n m, Pi 0 y : NatEq n m, Id (NatEq n m) x
     | zero -> fun x _ -> (match0 x with)
     | succ m -> nat_uip n m)
 
-def succ_injective(0 n m : Nat)(eq : Id Nat (succ n) (succ m)): Id Nat n m =
-  eq (fun x -> match x with | zero -> Void | succ x -> Id Nat n x) (refl Nat n)
-
 (* Nat is accessible *)
 
 def Less(n m : Nat): Type =
   match m with
-  | zero -> Void
+  | zero -> Bottom
   | succ m ->
     match n with
     | zero -> Unit
     | succ n -> Less n m
 
-def less_than_zero : Pi n : Nat, Less n zero -> Void =
-  nat_case (fun n -> Less n zero -> Void) (fun x -> x) (fun _ x -> x)
+def Leq (n m : Nat): Type = Less n (succ m)
+
+def less_than_zero : Pi n : Nat, Less n zero -> Bottom =
+  nat_rec (fun n -> Less n zero -> Bottom) (fun x -> x) (fun _ _ x -> x)
 
 def less_than_succ : Pi n : Nat, Less n (succ n) =
   nat_rec (fun (n : Nat) -> Less n (succ n)) tt (fun _ ih -> ih)
 
-def less_reflexive(n m : Nat): Less n m -> Less m n -> Id Nat n m =
-  match n return fun (n : Nat) -> Less n m -> Less m n -> Id Nat n m with
-  | zero -> (fun _ le -> match less_than_zero m le with)
-  | succ n ->
-    match m return fun (m : Nat) -> Less (succ n) m -> Less m (succ n) -> Id Nat (succ n) m with
-    | zero -> (fun le _ -> match less_than_zero (succ n) le with)
-    | succ m -> fun l0 l1 -> cong Nat Nat n m succ (less_reflexive n m l0 l1)
+def leq_is_less_or_eq : Pi (n m : Nat), Leq n m -> Either (Less n m) (Id Nat n m) =
+  nat_rec
+    (fun z -> Pi m : Nat, Leq z m -> Either (Less z m)(Id Nat z m))
+    (nat_rec
+      (fun z -> Leq zero z -> Either (Less zero z) (Id Nat zero z))
+      (fun _ -> right (Less zero zero) (Id Nat zero zero) (refl Nat zero))
+      (fun z _ _ -> left (Less zero (succ z)) (Id Nat zero (succ z)) tt))
+    (fun y ih -> nat_rec
+      (fun z -> Leq (succ y) z -> Either (Less (succ y) z) (Id Nat (succ y) z))
+      (fun l -> less_than_zero y l (Either (Less (succ y) zero) (Id Nat (succ y) zero)))
+      (fun z _ l ->
+        match ih z l with
+        | left l -> left (Less y z) (Id Nat (succ y) (succ z)) l
+        | right e -> right (Less y z) (Id Nat (succ y) (succ z)) (cong Nat Nat y z succ e)))
 
-def less_trans(y m n : Nat): Less y m -> Less m (succ n) -> Less y n =
-  let P = fun (y m n : Nat) -> Less y m -> Less m (succ n) -> Less y n in
-  match m return fun (m : Nat) -> P y m n with
-  | zero -> (fun lt _ -> match less_than_zero y lt with)
-  | succ m ->
-    match n return fun (n : Nat) -> P y (succ m) n with
-    | zero -> (fun _ lt -> match less_than_zero m lt with)
-    | succ n ->
-      match y return fun (y : Nat) -> P y (succ m) (succ n) with
-      | zero -> fun _ _ -> tt
-      | succ y -> less_trans y m n
+def strong (p : Nat -> Type)(h : Pi x : Nat, (Pi y : Nat, Less y x -> p y) -> p x): Pi (n m : Nat), Less m n -> p m =
+  nat_rec
+    (fun z -> Pi m : Nat, Less m z -> p m)
+    (fun m l -> less_than_zero m l (p m))
+    (fun n ih m l -> match leq_is_less_or_eq m n l with
+      | left l -> ih m l
+      | right e -> sym Nat m n e p (h n ih))
 
-def nat_less_acc(n m : Nat): Less m n -> Acc Nat Less m =
-  match n return fun (n : Nat) -> Less m n -> Acc Nat Less m with
-  | zero -> (fun le -> match less_than_zero m le with)
-  | succ n -> fun le -> Prelude.Acc.mk Nat Less m (fun y le2 -> nat_less_acc n y (less_trans y m n le2 le))
+def strong_induction (p : Nat -> Type)(h : Pi x : Nat, (Pi y : Nat, Less y x -> p y) -> p x)(n : Nat): p n =
+  strong p h (succ n) n (less_than_succ n)
 
-def nat_acc(n : Nat): Acc Nat Less n = nat_less_acc (succ n) n (less_than_succ n)
+def nat_wf (n : Nat): Acc Nat Less n =
+  strong_induction (Acc Nat Less) (mk Nat Less) n

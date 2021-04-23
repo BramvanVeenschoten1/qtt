@@ -3,6 +3,8 @@ module Largevec
 import Prelude
 import Nat
 
+(* Encoding of vectors using large elimination on natural numbers *)
+
 def Vec(A : Type)(n : Nat): Type =
   match n with
   | zero -> Unit

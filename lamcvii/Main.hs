@@ -4,7 +4,7 @@ import Core
 import Elaborator
 import Normalization
 import Substitution
-import ModuleSystem
+import Modulesystem
 
 import Data.Functor
 import Data.Map

@@ -12,36 +12,35 @@ def trans {0 A : Type}{0 x y z : A}(eq0 : Id A x y)(eq1 : Id A y z): Id A x z = 
 
 def cong {0 A B : Type}{0 x y : A}(0 f : A -> B)(eq : Id A x y): Id B (f x)(f y) = eq (fun z -> Id B (f x)(f z)) (refl B (f x))
 
-var uip : Pi 0 A : Type, Pi (0 x : A)(0 y : A)(0 eq0 : Id A x y)(eq1 : Id A x y), Id (Id A x y) eq0 eq1
-
-var id_irrelevant: Pi 0 A : Type, Pi 0 x : A, Pi 0 y : A, Id A x y => Id A x y 
-
 (* some basic datatypes *)
 
 data Unit
 | tt : Unit
 
+def Unit_equal (0 x : Unit): Pi 0 y : Unit, Id Unit x y =
+  match0 x return fun (x : Unit) -> Pi 0 y : Unit, Id Unit x y with
+  | tt -> fun y -> match0 y return fun (y : Unit) -> Id Unit tt y with
+    | tt -> refl Unit tt
+
 data Void
+
+def Bottom : Type = Pi a : Type, a
+
+def void (0 x : Bottom): Bottom =
+  (match0 x Void with)
 
 data Pair (A B : Type)
 | mk : Pi 1 _ : A, Pi 1 _ : B, Pair A B
+
+data Either(A B : Type)
+| left  : A -o Either A B
+| right : B -o Either A B
 
 data DPair (A : Type)(B : A -> Type)
 | mk : Pi 1 x : A, Pi 1 _ : B x, DPair A B
 
 data DPair0 (A : Type)(B : A -> Type)
 | mk : Pi 0 x : A, Pi 1 _ : B x, DPair0 A B
-
-def Unit_equal : Pi 0 x : Unit, Pi 0 y : Unit, Id Unit x y =
-  fun x -> match0 x return fun (x : Unit) -> Pi 0 y : Unit, Id Unit x y with
-  | tt -> fun y -> match0 y return fun (y : Unit) -> Id Unit tt y with
-    | tt -> refl Unit tt
-
-def Unit_irrelevant (0 x : Unit): DPair Unit (fun y -> Id Unit x y) =
-  Prelude.DPair.mk Unit (fun y -> Id Unit x y) tt (Unit_equal x tt)
-
-def void_irrelevant (0 x : Void): DPair Void (fun y -> Id Void x y) =
-  match0 x return fun (x : Void) -> DPair Void (fun y -> Id Void x y) with
 
 data Maybe(A : Type)
 | Nothing : Maybe A
@@ -74,22 +73,3 @@ data Acc(0 A : Type)(0 R : A -> A -> Type)(x : A)
 def wf_rec(0 A : Type)(0 R : A -> A -> Type)(0 P : A -> Type)(f : Pi x : A, (Pi y : A, R y x -> P y) -> P x)(x : A)(0 acc_x : Acc A R x): P x =
   match0 acc_x with
   | mk g -> f x (fun y lt -> wf_rec A R P f y (g y lt))
-
-def acc_rec(0 A : Type)
-           (0 R : A -> A -> Type)
-           (0 P : Pi x : A, Acc A R x -> Type)
-           (step : Pi x : A,
-                   Pi f : (Pi y : A, R y x -> Acc A R y), 
-                   (Pi y : A, Pi lt : R y x, P y (f y lt)) ->
-                     P x (Prelude.Acc.mk A R x f))
-           (x : A)
-           (xacc : Acc A R x):
-              P x xacc =
-  match xacc return P x with
-  | mk f -> step x f (fun y lt -> acc_rec A R P step y (f y lt))
-  
-def acc_case(0 A : Type)(0 R : A -> A -> Type)(x : A)(0 P : Acc A R x -> Type)(step : Pi f : (Pi y : A, R y x -> Acc A R y), P (Prelude.Acc.mk A R x f))(acc : Acc A R x): P acc =
-  match acc return P with
-  | mk f -> step f
-  
-  
