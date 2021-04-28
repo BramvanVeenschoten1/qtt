@@ -14,23 +14,29 @@ import Lexer(Loc)
 import Parser(Binder)
 import Normalization
 import Substitution
-import Iterator
+import Utils
 import Multiplicity
 import Parser
 import Core hiding (Branch,Inductive)
 import Elaborator
 import Prettyprint
+import Debug.Trace
 
-{- here we typecheck the abstract syntax tree (AST),
-   using a basic bidirectional checking algorithm,
-   also resolving variable names with type-driven name resolution
+{-
+  here we typecheck the abstract syntax tree (AST),
+  using a basic bidirectional checking algorithm,
+  also resolving variable names with type-driven name resolution
 -}
+toMult :: Int -> Mult
+toMult 0 = Zero
+toMult 1 = One
+toMult _ = Many
 
 convertible :: Objects -> Context -> Loc -> Term -> Term -> Elab ()
 convertible glob ctx loc t0 t1 =
   if Normalization.sub glob ctx False t0 t1
   then pure ()
-  else TypeError (InconvertibleTypes loc ctx t0 t1)
+  else TypeError (show loc ++ "inconvertible types:\n" ++ showTerm ctx t0 ++ "and:\n" ++ showTerm ctx t1)
 
 -- look up a qualified name in the symbol table
 lookupQualified :: ElabState -> Loc -> QName -> Elab (Term,Term,Uses)
@@ -43,7 +49,7 @@ lookupQualified glob loc qname =
 lookupUnqualified :: ElabState -> Loc -> Name -> Elab (Term,Term,Uses)
 lookupUnqualified glob loc name = let
   in case lookupName name glob of
-    Nothing -> TypeError (UnboundVar loc)
+    Nothing -> TypeError (show loc ++ "unbound variable")
     Just [qname] -> case lookupQName qname glob of
       Nothing -> err (show loc ++ "object belonging to name not present: " ++ showQName qname)
       Just (_,ref) -> pure (C.Const name ref, typeofRef (globalObjects glob) ref, noUses)
@@ -75,15 +81,15 @@ checkArgMult _ Many _ = pure ()
 checkArgMult _ Zero uses = f uses where
   f Nouse           = pure ()
   f (Oneuse Zero _) = pure ()
-  f (Oneuse _ loc) = TypeError (RelevantUse loc)
+  f (Oneuse _ loc) = TypeError (show loc ++ "relevant use of erased variable")
   f (CaseUse loc xs) = mapM_ f xs
   f (Adduse x y) = f x *> f y
 checkArgMult loc One uses = checkOne uses where
 
-  checkOne Nouse = TypeError (Unused loc)
-  checkOne (Oneuse Zero _) = TypeError (Unused loc)
+  checkOne Nouse = TypeError (show loc ++ "linear variable is unused")
+  checkOne (Oneuse Zero _) = TypeError (show loc ++ "linear variable is unused")
   checkOne (Oneuse One _) = pure ()
-  checkOne (Oneuse Many loc) = TypeError (UnrestrictedUse loc)
+  checkOne (Oneuse Many loc) = TypeError (show loc ++ "unrestricted use of linear variable")
   checkOne (Adduse x y) = do
     m <- checkMaybe x
     if m
@@ -93,15 +99,15 @@ checkArgMult loc One uses = checkOne uses where
   
   checkNone Nouse = pure ()
   checkNone (Oneuse Zero _) = pure ()
-  checkNone (Oneuse One loc) = TypeError (MultipleUse loc)
-  checkNone (Oneuse Many loc) = TypeError (UnrestrictedUse loc)
+  checkNone (Oneuse One loc) = TypeError (show loc ++ "multiple uses of linear variable")
+  checkNone (Oneuse Many loc) = TypeError (show loc ++ "unrestricted use of linear variable")
   checkNone (Adduse x y) = checkNone x *> checkNone y
   checkNone (CaseUse loc' xs) = mapM_ checkNone xs
   
   checkMaybe Nouse = pure False
   checkMaybe (Oneuse Zero _) = pure False
   checkMaybe (Oneuse One _) = pure True
-  checkMaybe (Oneuse Many loc) = TypeError (UnrestrictedUse loc)
+  checkMaybe (Oneuse Many loc) = TypeError (show loc ++ "unrestricted use of linear variable")
   checkMaybe (Adduse x y) = do
     m <- checkMaybe x
     if m
@@ -111,7 +117,7 @@ checkArgMult loc One uses = checkOne uses where
     uses <- mapM checkMaybe xs
     if and uses || not (or uses)
     then pure (or uses)
-    else TypeError (IntersectUse loc')
+    else TypeError (show loc' ++ "linear variable is not used consistently across match arms")
 
 {-
 Given the ast for some branches, identify the constructors and/or default case that are covered.
@@ -134,7 +140,7 @@ identifyBranches glob ctx obj_id defno = f where
     (found_branches, found_ctors, default_branch) <- identifyBranches glob ctx obj_id defno xs
     
     if elem ctor_name found_ctors
-    then TypeError (Msg (show loc ++ "duplicate cases in match expression"))
+    then TypeError (show loc ++ "duplicate cases in match expression")
     else pure ()
         
     case refs >>= foldr g Nothing of
@@ -142,13 +148,16 @@ identifyBranches glob ctx obj_id defno = f where
       Nothing ->
         if Prelude.null xs && Prelude.null ctor_args
         then pure ([], [], Just branch)
-        else TypeError (Msg (show loc ++ "'" ++ ctor_name ++ "' is not a constructor name of this type"))
+        else TypeError (show loc ++ "'" ++ ctor_name ++ "' is not a constructor name of this type")
 
 -- check a match expression against a given motive
 checkMatch ::  ElabState -> Context -> Loc -> Mult -> Expr -> Term -> [Branch] -> Elab (Term,Term,Uses)
 checkMatch glob ctx loc mult scrutinee motive branches = do
   let obs = globalObjects glob
   
+  when (mult == Zero && length branches > 1)
+    (err (show loc ++ "an erased case distinction can have at most one branch"))
+
   (eliminee,elim_ty,elim_uses) <- synth glob ctx scrutinee
   
   (obj_id,defno,indparams) <- case whd obs ctx elim_ty of
@@ -164,8 +173,10 @@ checkMatch glob ctx loc mult scrutinee motive branches = do
   
   (branch_list, _, default_branch) <- identifyBranches glob ctx obj_id defno branches
   
-  let C.Inductive {paramno = pno, introRules = ctors} =
+  let C.Inductive {paramno = pno, introRules = ctors, isLarge = large} =
         maybe (error "2") id (Data.Map.lookup obj_id (globalInd (globalObjects glob))) !! defno
+        
+      motive_sort = sortOf obs ctx motive
       
       (ctor_names,ctor_arities,ctor_tys) = unzip3 ctors
 
@@ -260,6 +271,10 @@ checkMatch glob ctx loc mult scrutinee motive branches = do
             
             pure ((False,branch_rhs), uses')
 
+  case motive_sort of
+    Box -> when large (err (show loc ++ "large eliminations on large inductive types are not allowed"))
+    _ -> when False (trace "some allowed elimination" (pure ()))
+
   (branches, uses) <- fmap unzip (zipWithM checkBranch [0..] ctor_tys)
   
   let result_type = App motive [eliminee]
@@ -307,7 +322,7 @@ synth glob ctx expr = case expr of
             (a,ua) <- check glob ctx arg ta
             (args',tb',uargs) <- checkArgs (subst a tb) args
             pure (a:args', tb', plusUses (timesUses m ua) uargs)
-          x -> err (
+          x -> TypeError (
                   show loc ++ "\n" ++
                   showContext ctx ++ "\n" ++
                   "application expected some function, but got:\n" ++
@@ -321,8 +336,9 @@ synth glob ctx expr = case expr of
         u = useSum ux
     pure (Let name ta a b, subst a tb, plusUses (timesUses u ua) ub)
   ELambda loc _ _ Nothing _ -> err (show loc ++ showContext ctx ++ "\n\ncannot infer lambda")--TypeError (SynthLambda loc)
-  ELambda loc m bind (Just ta) b -> do
-    let la = exprLoc ta
+  ELambda loc m' bind (Just ta) b -> do
+    let m = toMult m'
+        la = exprLoc ta
     (ta,ka,_) <- synth glob ctx ta
     checkSort (globalObjects glob) ctx la ka
     let name = binderName bind
@@ -335,8 +351,9 @@ synth glob ctx expr = case expr of
     let ux : ub = ub0
     checkArgMult loc' m ux
     pure (Lam m name ta b, Pi m name ta tb, ub)
-  EPi loc m bind ta tb -> do
-    let la = exprLoc ta
+  EPi loc m' bind ta tb -> do
+    let m  = toMult m'
+        la = exprLoc ta
         lb = exprLoc tb
     (ta,ka,_) <- synth glob ctx ta
     let name = maybe "" binderName bind
@@ -351,7 +368,7 @@ synth glob ctx expr = case expr of
     pure (Pi m name ta tb, kb, noUses)
   EMatch loc mult term motive cases -> do
     motive <- (case motive of
-      Nothing -> TypeError (SynthMatch loc)
+      Nothing -> TypeError (show loc ++ "cannot synthesise motive for match expression")
       Just motive -> pure motive)
     
     let motive_loc = exprLoc motive
@@ -368,7 +385,7 @@ synth glob ctx expr = case expr of
               "motive expected some function, but got:\n" ++
               showTerm ctx x ++ "\n")
   
-    checkMatch glob ctx loc mult term motive' cases
+    checkMatch glob ctx loc (toMult mult) term motive' cases
   ELetRec loc funs a -> do
     err "nested let-recs are not implemented"
 
@@ -442,7 +459,7 @@ check glob ctx expr ty = case expr of
     pure (Let name ta a b, plusUses (timesUses u ua) ub)
   EMatch loc mult scrutinee Nothing branches -> do
     (_,ta,_) <- synth glob ctx scrutinee
-    (t,_,u) <- checkMatch glob ctx loc mult scrutinee (Lam Many "" ta (lift 1 ty)) branches
+    (t,_,u) <- checkMatch glob ctx loc (toMult mult) scrutinee (Lam Many "" ta (lift 1 ty)) branches
     pure (t,u)
   x -> do
     (a,ta,ua) <- synth glob ctx x

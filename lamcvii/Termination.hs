@@ -11,7 +11,7 @@ import qualified Core as C
 import Core hiding (Inductive,Fixpoint)
 import Elaborator
 import Elab
-import Iterator
+import Utils
 import Normalization
 import Substitution
 import Parser
@@ -67,12 +67,12 @@ getRecursiveCalls glob ctx = getRecCalls ctx (fmap Recursive [0 .. length ctx - 
   
   -- check whether some match branches are all subterms of some seed
   isCaseSmaller :: [Maybe Int] -> Maybe Int
-  isCaseSmaller [] = Nothing
   isCaseSmaller (Just n : xs)
     | all (\x -> (==) (Just n) x) xs = Just n
-    | otherwise = Nothing
+  isCaseSmaller _ = Nothing
   
   -- find if a term is smaller and if so, return argument number
+  -- case branches need to have lambda's stripped
   isSmaller :: Context -> [Subdata] -> Term -> Maybe Int
   isSmaller ctx subs t = case whd glob ctx t of
     Var n -> case subs !! n of
@@ -125,9 +125,9 @@ getRecursiveCalls glob ctx = getRecCalls ctx (fmap Recursive [0 .. length ctx - 
             in (defno, small_args) : arg_calls
           _ -> arg_calls
         _ -> arg_calls
-    Lam _ name ta b -> getRecCalls (Hypothesis name ta Nothing : ctx) (isRecArg argc : subs) (argSucc argc) b
+    Lam _ name ta b -> getRecCalls (Hypothesis name ta Nothing  : ctx) (isRecArg argc : subs) (argSucc argc) b
     Let name ta a b -> getRecCalls (Hypothesis name ta (Just a) : ctx) (isRecArg argc : subs) (argSucc argc) b
-    Pi _ name ta tb -> getRecCalls (Hypothesis name ta Nothing : ctx) (Other : subs) Past tb
+    Pi _ name ta tb -> getRecCalls (Hypothesis name ta Nothing  : ctx) (Other : subs) Past tb
     Case distinct -> let
       (obj_id,defno) = case whd glob ctx (elimType distinct) of
         App (Const _ (IndRef obj_id defno _)) _ -> (obj_id,defno)
@@ -164,37 +164,6 @@ getRecursiveCalls glob ctx = getRecCalls ctx (fmap Recursive [0 .. length ctx - 
     _ -> []
 
 {-
-  because it simplifies subsequent termination checks, improves reduction behaviour,
-  and subsumes the special case in Declaration.hs.
-
-  return list of non_recs and new rec_calls
-  
-  graph ordering between non-recursive calls is preserved in the list
-  
-  non-recursive bodies are filtered from the result list.
- -}
- 
-filterNonRecs :: [Int] -> [[RecCall]] -> ([Int],[[RecCall]])
-filterNonRecs non_recs rec_calls = let
-    tagged_rec_calls = zip [0..] rec_calls
-    
-    -- give the numbers of the definitions that do no recursive calls, if they haven't been shown to be non-recursive
-    -- in a previous iteration
-    isEmpty :: (Int,[RecCall]) -> [Int] -> [Int]
-    isEmpty (defno,calls) acc
-      | elem defno non_recs = acc
-      | Prelude.null calls = defno : acc
-      | otherwise = acc
-    
-    new_non_recs = Data.List.foldr isEmpty [] tagged_rec_calls
-    
-    new_rec_calls = fmap (Data.List.filter (\call -> not (elem (fst call) new_non_recs))) rec_calls
-  in if Prelude.null new_non_recs
-     then (non_recs, new_rec_calls)
-     else filterNonRecs (non_recs ++ new_non_recs) new_rec_calls
-
-
-{-
   Given the recursive calls, check the totality of a fixpoint by computing recursive parameters of the mutually recursive functions.
   a fixpoint is guarded if in each recursive call, the recursive parameter of the callee is smaller than the
   recursive parameter of the caller. What exactly constitutes a smaller argument is defined in getRecursiveCalls.
@@ -205,7 +174,6 @@ filterNonRecs non_recs rec_calls = let
 findRecparams :: [[RecCall]] -> Maybe [Int]
 findRecparams rec_calls = let
   defcount = length rec_calls
-  
   {-
     compute the possibly recursive parameters for the current definition.
     The candidates are constrained by 3 factors:

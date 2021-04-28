@@ -32,12 +32,12 @@ checkModule (mod_name,imports,decls) in_progress globnobs = do
       
       checkCircularities
         | Prelude.null circularities = pure ()
-        | otherwise = Left (Msg ("circular imports: " ++ intercalate " " circularities))
+        | otherwise = Left ("circular imports: " ++ intercalate " " circularities)
       
       checkDependency (globs @ (unverified, global_names, _, _)) dep_name
         | Data.Map.member dep_name global_names = pure globs
         | otherwise = case find (\(name,_,_) -> name == dep_name) unverified of
-          Nothing -> Left (Msg ("unknown module name: " ++ dep_name))
+          Nothing -> Left ("unknown module name: " ++ dep_name)
           Just dep -> checkModule dep (mod_name : in_progress) globs
   
   checkCircularities

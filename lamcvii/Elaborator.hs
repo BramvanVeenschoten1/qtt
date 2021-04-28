@@ -17,36 +17,9 @@ import Multiplicity
 import Parser
 import Core(Term(..), Context)
 
-data Error
-  -- namespace errors, always fatal
-  = Msg String
-  | NameAlreadyDefined QName Loc
-  | NoSuitableDefinition Name Loc
-  | Ambiguity Name Loc [QName]
-  | UnboundVar Loc
-  -- totality
-  | Nonterminating [Loc]
-  | Nonpositive [Loc]
-  -- fatal type errors
-  | SynthLambda Loc
-  | SynthMatch Loc
-  | SynthParam Loc
-  -- ambiguous type errors
-  | ExpectedFunction Loc Term
-  | InvalidSort Term
-  | ExpectedInductive Term
-  | InvalidConstructor Binder C.Reference
-  | MissingCase Loc C.Reference
-  | ConstructorArity Loc C.Reference
-  | InconvertibleTypes Loc Context Term Term
-  -- multiplicity errors, always ambiguous
-  | Unused Loc -- linear variable is unused
-  | RelevantUse Loc -- erased argument used relevantly
-  | MultipleUse Loc -- linear variable already used once
-  | UnrestrictedUse Loc -- linear variable in unrestricted context
-  | IntersectUse Loc -- linear variable is used inconsistently across match arms
+err = TypeError
 
-err msg = TypeError (Msg msg)
+type Error = String
 
 type NameSpace = (Map Name [QName], Map QName (Loc, C.Reference))
 
@@ -92,8 +65,8 @@ instance Alternative Result where
 instance Monad Result where
   return = pure
   
-  TypeError err  >>= f = TypeError err
-  Clear x        >>= f = f x
+  TypeError err    >>= f = TypeError err
+  Clear x          >>= f = f x
   Ambiguous n i xs >>= f = Ambiguous n i (fmap (\(n,x) -> (n, x >>= f)) xs)
 
 compress :: Result a -> Result a
@@ -102,7 +75,7 @@ compress (Ambiguous n i xs) = g (Data.List.foldr f [] xs) where
     TypeError _ -> acc
     x -> (n,x) : acc
 
-  g [] = TypeError (NoSuitableDefinition n i)
+  g [] = TypeError (show i ++ "no suitable definition for " ++ n)
   g [(_,x)] = x
   g xs = Ambiguous n i xs
 compress x = x
@@ -111,7 +84,7 @@ disambiguate :: Result a -> Either Error a
 disambiguate result = case compress result of
   Clear x -> Right x
   TypeError err -> Left err
-  Ambiguous n i xs -> Left (Ambiguity n i (fmap fst xs))
+  Ambiguous n i xs -> Left (show i ++ "ambiguous name: " ++ n)
 
 data ElabState = ElabState {
   newName       :: Int,

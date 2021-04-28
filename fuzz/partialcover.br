@@ -1,6 +1,10 @@
 module Partialcover
 
-import Prelude
+data Void
+
+data Maybe(A : Type)
+| Nothing :      Maybe A
+| Just    : A -o Maybe A
 
 def foo (x : Maybe Void): Void =
   match x with

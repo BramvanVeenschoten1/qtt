@@ -13,7 +13,7 @@ import qualified Core as C
 import Core hiding (Inductive,Fixpoint)
 import Elaborator
 import Elab
-import Iterator
+import Utils
 import Normalization
 import Substitution
 import Parser
@@ -30,7 +30,7 @@ import Termination
 ensureUnique :: ElabState -> QName -> Either Error ()
 ensureUnique glob qname = case lookupQName qname glob of
   Nothing -> pure ()
-  Just (info,_) -> Left (NameAlreadyDefined qname info)
+  Just (info,_) -> Left (showQName qname ++ " is already defined here:\n" ++ show info)
 
 updateNameSpace :: [(QName, Loc, Reference)] -> NameSpace -> NameSpace
 updateNameSpace names (shorts,longs) = let
@@ -54,9 +54,8 @@ checkInductive glob defs = do
   mapM_ (ensureUnique glob) ctor_qnames
   mapM_ (ensureUnique glob) qnames
 
-  let 
-      f :: Context -> [Param] -> Result Context
-      f ctx ((_,bind,Nothing):_) = TypeError (SynthParam (binderLoc bind))
+  let f :: Context -> [Param] -> Result Context
+      f ctx ((_,bind,Nothing):_) = TypeError (show (binderLoc bind) ++ "cannot synthesize parameters of inductive type")
       f ctx ((_,bind,Just ty):params) = do
         (ty,_,_) <- synth glob ctx ty
         f (Hypothesis (binderName bind) ty Nothing : ctx) params
@@ -67,9 +66,7 @@ checkInductive glob defs = do
 
   params <- mapM checkParams defs
   
-  let 
-  
-      arity :: Context -> Term
+  let arity :: Context -> Term
       arity = Data.List.foldl (\acc hyp -> Pi Zero (hypName hyp) (hypType hyp) acc) Star
       
       defcount = length defs
@@ -91,10 +88,12 @@ checkInductive glob defs = do
   (ctor_tys) <- mapM checkDef (zip3 [0..] params ctors)
 
   let fresh_id = newName glob
-      
+      -- abstracted ctors explicitly quantify over the datatype parameters
       abstractCtors :: Context -> [Term] -> [Term]
       abstractCtors params ctors = fmap (flip f params) ctors where
         f = Data.List.foldl (\acc hyp -> Pi Zero (hypName hyp) (hypType hyp) acc)
+      
+      isAnyCtorLarge = any or (zipWith (\ps -> fmap (isCtorLarge (globalObjects glob) (ps ++ arities_ctx))) params ctor_tys)
       
       abstracted_ctors = zipWith abstractCtors params ctor_tys
       
@@ -123,6 +122,7 @@ checkInductive glob defs = do
       
       object = zipWith5 (\arity ctor_names ctor_arities ctor_tys params ->
         C.Inductive {
+          isLarge = isAnyCtorLarge,
           indSort = arity,
           paramno = length params,
           introRules = zip3 ctor_names ctor_arities ctor_tys}) arities ctor_names ctor_arities ctor_instances params
@@ -130,11 +130,17 @@ checkInductive glob defs = do
       name_loc_refs = ctor_ref_name_locs ++ def_name_loc_refs
       name_names = zip (concat ctor_names) ctor_qnames ++ zip names qnames
   
-  when (names == ["Acc"]) $ do
+  when False $ do
+    trace "{" (pure ())
+    trace (show isAnyCtorLarge) (pure ())
+    trace "}" (pure ())
+  
+  when False $ do -- (names == ["Acc"]) $ do
     trace (showTerm [] (head (head abstracted_ctors))) (pure ())
     trace (show ctor_arities) (pure ())
     
-  trace (show qnames ++ " " ++ show uniparamno ++ "\n") (pure ())
+  when False $ do
+    trace (show qnames ++ " " ++ show uniparamno ++ "\n") (pure ())
   
   pure  glob {
     newName = fresh_id + 1,
@@ -169,68 +175,42 @@ checkDefinition glob defs = do
       uniparamno = Data.List.foldr getUniparamno maxBound checked_bodies
       
       rec_calls = fmap (getRecursiveCalls (globalObjects glob) signatures) checked_bodies
-      
-      (non_recs, rec_calls') = filterNonRecs [] rec_calls
-      
-      -- an association list of definition numbers to object ids for non-recursive definitions
-      non_rec_ids = zip non_recs [obj_id  ..]
-      
-      traverseRecs :: Int -> [Int] -> [(Int,Int)]
-      traverseRecs n [] = []
-      traverseRecs n (x:xs)
-        | elem x non_recs = traverseRecs n xs
-        | otherwise = (n,x) : traverseRecs (n + 1) xs
-      
-      -- an association list of definition numbers to shifted definition numbers after removing non-recursive definitions
-      rec_defnos = traverseRecs 0 [0 .. length signatures - 1]
-      
-      updateCall :: RecCall -> RecCall
-      updateCall (defno,args) = (fromJust (Data.List.lookup defno rec_defnos), args)
-      
-      -- recursive calls, with defnos shifted to accomodate removal of non-recursive functions
-      rec_calls'' = fmap (fmap updateCall) rec_calls'
   
-  rec_args <- maybe (Left (Nonterminating locs)) Right (findRecparams rec_calls'')
-  let
-    fix_id = obj_id + length non_rec_ids
-  
-    makeRef :: Int -> Reference
-    makeRef defno
-      | elem defno non_recs = DefRef (fromJust (Data.List.lookup defno non_rec_ids)) height
-      | otherwise = let
-        rec_defno = fromJust (Data.List.lookup defno rec_defnos)
-        rec_arg = rec_args !! rec_defno
-        in FixRef fix_id rec_defno rec_arg height uniparamno
-    
-    refs = fmap makeRef [0..]
-    
-    consts = zipWith Const names refs
-    
-    typed_bodies = zipWith3 (\defno sig body -> (defno, hypType sig, psubst consts body)) [0..] signatures checked_bodies
-    
-    (def_objects, fix_bodies) = Data.List.partition (\(x,_,_) -> elem x non_recs) typed_bodies
-    
-    fix_object = zipWith (\(_,ty,bo) rec_arg -> C.Fixpoint ty bo rec_arg) fix_bodies rec_args
-    
-    insertDefs :: Map Int Definition -> Map Int Definition
-    insertDefs mp = Data.List.foldr (\(defno,ty,bo) -> Data.Map.insert (fromJust (Data.List.lookup defno non_rec_ids)) (ty,bo)) mp def_objects
-
-    insertFix
-      | Prelude.null fix_bodies = id
-      | otherwise = Data.Map.insert fix_id fix_object
-
-    new_id
-      | Prelude.null fix_bodies = fix_id
-      | otherwise = fix_id + 1
-
-  --trace (show names ++ "\n" ++ show uniparamno ++ "\n\n") (pure ())
-  
-  pure glob {
-    newName = new_id,
-    internalNames = updateNameSpace (zip3 qnames locs refs) (internalNames glob),
-    globalObjects = obs {
-      globalDef = insertDefs (globalDef obs),
-      globalFix = insertFix (globalFix obs)}}
+  case rec_calls of
+    [[]] -> let
+      name  = head names
+      qname = head qnames
+      loc   = head locs
+      ref   = DefRef obj_id height
+      const = Const name ref
+      ty    = hypType (head signatures)
+      checked_body = head checked_bodies
+      body  = psubst [const] checked_body
+      
+      in pure glob {
+        newName = obj_id + 1,
+        internalNames = updateNameSpace [(qname, loc, ref)] (internalNames glob),
+        globalObjects = obs {
+          globalDef = Data.Map.insert obj_id (ty,body) (globalDef obs)}}
+    _ -> do
+      rec_args <- maybe (Left ("cannot infer decreasing path in fixpoint:" ++ concatMap show locs)) Right (findRecparams rec_calls)
+      let
+        makeRef :: Int -> Int -> Reference
+        makeRef defno rec_arg = FixRef obj_id defno rec_arg height uniparamno
+        
+        refs = zipWith makeRef [0..] rec_args
+        
+        consts = zipWith Const names refs
+        
+        typed_bodies = zipWith3 (\defno sig body -> (defno, hypType sig, psubst consts body)) [0..] signatures checked_bodies
+         
+        fix_object = zipWith (\(_,ty,bo) rec_arg -> C.Fixpoint ty bo rec_arg) typed_bodies rec_args
+        
+      pure glob {
+        newName = obj_id + 1,
+        internalNames = updateNameSpace (zip3 qnames locs refs) (internalNames glob),
+        globalObjects = obs {
+          globalFix = Data.Map.insert obj_id fix_object (globalFix obs)}}
 
 checkDecl :: ElabState -> Decl -> Either Error ElabState
 checkDecl glob decl = {-trace (show (declNames decl) ++ "\n") $ -} case decl of

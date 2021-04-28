@@ -7,9 +7,6 @@ import Data.Function
 import Data.Array.Unboxed
 import Data.Maybe
 
--- replace mult by Maybe Int or sumthin
-import Core(Mult(..))
-
 type Name = String
 type QName = [String]
 
@@ -24,7 +21,7 @@ instance Ord Binder where
 instance Show Binder where
   show = binderName
 
-type Param = (Mult,Binder, Maybe Expr)
+type Param = (Int,Binder, Maybe Expr)
 
 type Ctor = (Binder, Expr)
 
@@ -48,14 +45,14 @@ data Expr
   | EVar    Loc Name
   | EApply  Loc Expr [Expr]
   | ELet    Loc Binder (Maybe Expr) Expr Expr
-  | ELambda Loc Mult Binder (Maybe Expr) Expr
-  | EPi     Loc Mult (Maybe Binder) Expr Expr
+  | ELambda Loc Int Binder (Maybe Expr) Expr
+  | EPi     Loc Int (Maybe Binder) Expr Expr
   | ELetRec Loc [Function] Expr
-  | EMatch  Loc Mult Expr (Maybe Expr) [Branch]
+  | EMatch  Loc Int Expr (Maybe Expr) [Branch]
 
-showArrow Zero = " => "
-showArrow One  = " -o "
-showArrow Many = " -> "
+showArrow 0 = " => "
+showArrow 1 = " -o "
+showArrow 2 = " -> "
 
 exprLoc (EType s) = s
 exprLoc (EHole s) = s
@@ -71,6 +68,22 @@ exprLoc (EMatch s _ _ _ _) = s
 mkBinder :: (Loc,String) -> Binder
 mkBinder = uncurry Binder
 
+isPrimary :: Parser Bool
+isPrimary = do
+  t <- peek token
+  pure $ case t of
+    Symbol x     -> True
+    Pct "_"      -> True
+    Pct "Type"   -> True
+    Pct "Pi"     -> True
+    Pct "match0" -> True
+    Pct "match1" -> True
+    Pct "match"  -> True
+    Pct "fun"    -> True
+    Pct "let"    -> True
+    Pct "("      -> True
+    _            -> False 
+    
 primary = do
   ws
   begin <- getCursor
@@ -80,9 +93,9 @@ primary = do
     Pct "_"      -> pure (EHole span)
     Pct "Type"   -> pure (EType span)
     Pct "Pi"     -> parseProduct begin
-    Pct "match0" -> match Zero begin
-    Pct "match1" -> match One  begin
-    Pct "match"  -> match Many begin
+    Pct "match0" -> match 0 begin
+    Pct "match1" -> match 1 begin
+    Pct "match"  -> match 2 begin
     Pct "fun"    -> lam begin
     Pct "let"    -> lett begin
     Pct "("      -> expr <* expect ")" "closing ')' after expression"
@@ -112,13 +125,13 @@ qname begin x = do
           pure (x : xs)
         _ -> pure [x]
 
-mult :: Parser Mult
+mult :: Parser Int
 mult = do
   t <- peek token
   case t of
-    Number 0 -> token *> pure Zero
-    Number 1 -> token *> pure One
-    _        ->          pure Many
+    Number 0 -> token *> pure 0
+    Number 1 -> token *> pure 1
+    _        ->          pure 2
 
 annot :: Parser (Maybe Expr)
 annot = do
@@ -188,7 +201,7 @@ pattern = (,) <$> ctor <*> many args where
       Symbol x -> pure (mkBinder (span, x))
       x -> err span "some variable or wildcard" (show x)
 
-match :: Mult -> Cursor -> Parser Expr
+match :: Int -> Cursor -> Parser Expr
 match m begin = do
   scrutinee <- expr
   t <- peek token
@@ -229,20 +242,8 @@ app = do
   else pure (EApply span prim borgs)
   where
   args = do
-    t <- peek token
-    case t of
-      Symbol _     -> f
-      Pct "Pi"     -> f
-      Pct "fun"    -> f
-      Pct "let"    -> f
-      Pct "match"  -> f
-      Pct "match0" -> f
-      Pct "match1" -> f
-      Pct "_"      -> f
-      Pct "("      -> f
-      _            -> pure []
-
-  f = (:) <$> primary <*> args
+    b <- isPrimary
+    if b then (:) <$> primary <*> args else pure []
 
 unfoldParams :: [Param] -> (Maybe Expr, Expr) -> (Maybe Expr, Expr)
 unfoldParams [] x = x
@@ -286,9 +287,9 @@ arrow = do
   lhs   <- app
   t     <- peek token
   case t of
-    Pct "=>" -> f begin lhs Zero
-    Pct "-o" -> f begin lhs One
-    Pct "->" -> f begin lhs Many
+    Pct "=>" -> f begin lhs 0
+    Pct "-o" -> f begin lhs 1
+    Pct "->" -> f begin lhs 2
     _ -> return lhs
     where
       f begin lhs m = do

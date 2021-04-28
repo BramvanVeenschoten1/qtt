@@ -5,7 +5,7 @@ import Data.Map
 data Mult = Zero | One | Many deriving (Eq,Ord)
 
 data Term
-  = Box 
+  = Box
   | Star
   | Var   Int
   | App   Term [Term]
@@ -20,7 +20,7 @@ data Term
   they depend upon and is used as a heuristic for reduction
   
   uniparamno for fixpoints and inductive types is highest the number of the first parameters that are
-  uniformly applied to recursive occurrences in the bodies/constructors and are used for
+  uniformly applied to *all recursive occurrences* in the bodies/constructors and are used for
   termination checking and positivity checking respectively
   
   recparamno for fixpoints indicates the argument that is supposed to decrease in each recursive call,
@@ -52,6 +52,7 @@ data Fixpoint = Fixpoint {
   recParamno :: Int}
 
 data Inductive = Inductive {
+  isLarge    :: Bool, -- The Inductive type is large if it embeds Type. In this case, large elimination is not allowed.
   indSort    :: Term,
   paramno    :: Int, -- is computable from unroll Pi
   introRules :: [(String,Int,Term)]} -- [(name, paramno, ty)]

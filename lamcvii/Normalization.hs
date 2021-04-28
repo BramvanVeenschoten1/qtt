@@ -7,7 +7,7 @@ import Data.Function
 import Core
 import Multiplicity
 import Substitution
-import Iterator
+import Utils
 import Prettyprint
 import Debug.Trace
 
@@ -60,7 +60,7 @@ sub glob ctx flag t0 t1 = alpha_eq ctx flag t0 t1 || machineEq flag t0 t1 where
     (Star, Star) -> True
     (Var n0, Var n1) -> n0 == n1
     (Const _ ref,Const _ ref1) -> ref == ref1
-    (App f0 xs0, App f1 xs1) -> sub glob ctx flag f0 f1 && and (zipWith (sub glob ctx flag) xs0 xs1)
+    (App f0 xs0, App f1 xs1) -> sub glob ctx flag f0 f1 && and (zipWith (sub glob ctx True) xs0 xs1)
     (Lam m n src t0, Lam _ _ _ t1) -> let
       hyp = Hypothesis {hypName = n, hypType = src, hypDef = Nothing}
       in sub glob (hyp : ctx) flag t0 t1
@@ -114,4 +114,3 @@ sub glob ctx flag t0 t1 = alpha_eq ctx flag t0 t1 || machineEq flag t0 t1 where
 --          show norm1 ++ " " ++ showTerm ctx (unwind (fst m1)) ++ "\n")
             (not (norm0 && norm1) && smallDeltaStep flag m0 m1)
 --          )
-

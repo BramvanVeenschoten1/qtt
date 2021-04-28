@@ -15,6 +15,10 @@ import Control.Monad
 
 {- here we do IO
 get modules and verify, print signatures
+
+TODO: define largeness for inductive types
+TODO: restrict elimination on large inductive types
+TODO: relax termination check to ignore terms without recursive occurrences
 -}
 
 main :: IO ()

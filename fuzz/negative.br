@@ -1,6 +1,6 @@
 module Negative
 
-import Prelude
+data Void
 
 (* This should not pass the positivity checker *)
 data Neg

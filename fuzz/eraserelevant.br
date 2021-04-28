@@ -1,0 +1,10 @@
+module Eraserelevant
+
+data bool
+| true  : bool
+| false : bool
+
+def from_thin_air(0 x : bool): bool =
+  match0 x with
+  | true  -> true
+  | false -> false

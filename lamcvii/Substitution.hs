@@ -1,6 +1,6 @@
 module Substitution where
 
-import Iterator
+import Utils
 import Core
 import Data.List
 
@@ -10,7 +10,7 @@ liftFrom :: Int -> Int -> Term -> Term
 liftFrom k n = f k where
   f k (Var m)
     | m >= k = Var (m + n)
-  f k t = Iterator.map (const (+1)) k f t
+  f k t = Utils.map (const (+1)) k f t
 
 lift :: Int -> Term -> Term
 lift = liftFrom 0
@@ -23,10 +23,9 @@ psubst args = f 0 where
     | n >= k + nargs = Var (n - nargs) -- free
     | n < k = t -- local
     | otherwise = lift k (args !! (n - k)) -- in bounds
-  f k (t @ (App fun args)) = g (f k fun) (fmap (f k) args)
-  f k t = Iterator.map (const (+1)) k f t
+  f k (App fun args) = g (f k fun) (fmap (f k) args)
+  f k t = Utils.map (const (+1)) k f t
   
-  g (Lam _ _ _ body) (arg:args) = g (psubst [arg] body) args
   g fun [] = fun
   g (App f args) args' = App f (args ++ args')
   g fun args = App fun args
@@ -57,4 +56,4 @@ substWithDummy block_no = f () where
     in if Prelude.null right_args
       then Box
       else App Box (fmap (f ()) right_args)
-  f _ t = Iterator.map (const id) () f t
+  f _ t = Utils.map (const id) () f t

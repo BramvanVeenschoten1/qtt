@@ -11,17 +11,30 @@ import qualified Core as C
 import Core hiding (Inductive,Fixpoint)
 import Elaborator
 import Elab
-import Iterator
+import Utils
 import Normalization
 import Substitution
 import Parser
 import Multiplicity
 import Lexer(Loc)
 import Prettyprint
+import Debug.Trace
 
 assert :: Bool -> String -> Either Error ()
 assert True _ = pure ()
-assert False msg = Left (Msg msg)
+assert False msg = Left msg
+
+{-
+  check if the constructor embeds inhabitants of Box
+  should not include data parameters
+-}
+isCtorLarge :: Objects -> Context -> Term -> Bool
+isCtorLarge glob ctx = g where
+    g (Pi _ n src dst) = f (sortOf glob ctx src) || isCtorLarge glob (Hypothesis n src Nothing : ctx) dst
+    g _ = False
+  
+    f Box = True
+    f _ = False
 
 allOccurrencesPositive :: Objects -> Context -> Loc -> Int -> Int -> Int -> Int -> Int -> Term -> Either Error ()
 allOccurrencesPositive glob ctx loc defcount defno paramno n nn t = f (whd glob ctx t) where
@@ -71,8 +84,7 @@ strictlyPositive glob ctx loc n nn t = f (whd glob ctx t) where
     assert (all (doesNotOccur ctx n nn) args)
            (show loc ++ "Cannot determine strict positivity of recursive occurrence in function call")
   f (Var n) = pure ()
-  f _ = Left (Msg (show loc ++ "Strict positivity check wildcard error"))
-
+  f _ = Left (show loc ++ "Strict positivity check wildcard error")
 {- 
    why does matita:
    - disallow nesting in mutual types?
@@ -105,4 +117,4 @@ doesNotOccur ctx n nn t = f 0 t True where
     | otherwise = case nth (m - k) ctx >>= hypDef of
       Just bo -> f 0 (lift (m - k) bo) True
       Nothing -> True
-  f k t _ = Iterator.fold (const (+1)) k f t True
+  f k t _ = Utils.fold (const (+1)) k f t True

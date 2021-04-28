@@ -4,41 +4,10 @@ import Lexer(Loc)
 import Parser(Binder(..))
 import Core
 import Elaborator
-import Iterator
+import Utils
 
 import Data.Map
 import Data.List
-
--- this is a bad joke now
-instance Show Error where
-  show x = case x of
-    Msg msg -> msg
-    NameAlreadyDefined qname loc -> showQName qname ++ " has already been defined here:\n" ++ show loc
-    NoSuitableDefinition name loc -> show loc ++ "no definition for " ++ name ++ " is suitable."
-    Ambiguity name loc qnames -> show loc ++ "Cannot infer suitable definition for " ++ name ++ ", candidates are: \n" ++ list_names qnames
-    UnboundVar loc -> show loc ++ " unbound variable"
-    
-    Nonterminating loc -> show loc ++ "cannot infer decreasing path for fixpoint"
-    SynthLambda loc -> show loc ++ " cannot infer type of un-annotated lambda expression"
-    SynthMatch loc -> show loc ++ " cannot infer type of match expression without motive"
-    SynthParam loc -> show loc ++ " cannot infer type of an inductive parameter"
-    
-    ExpectedFunction loc _ -> show loc ++ "expected a function but got something else"
-    InvalidSort _ -> "an invalid sort, somewhere"
-    ExpectedInductive _ -> "expected an inductive type, somewhere"
-    InvalidConstructor bind ref -> show (binderLoc bind) ++ binderName bind ++ " is not a constructor of " ++ "[PLACEHOLDER]"
-    MissingCase loc ref -> show loc ++ " match does not cover all cases"
-    ConstructorArity loc ref -> show loc ++ " mismath between given number of arguments and arity of constructor in match expression"
-    InconvertibleTypes loc ctx t0 t1 ->
-      show loc ++ "inconvertible types, expected:\n" ++ showTerm ctx t0 ++ "\n but got:\n" ++ showTerm ctx t1
-    
-    Unused loc -> show loc ++ "Linear variable is unused"
-    RelevantUse loc -> show loc ++ "Erased variable is used in relevant context"
-    MultipleUse loc -> show loc ++ "Linear variable is already used once"
-    UnrestrictedUse loc -> show loc ++ "Linear variable is used in unrestricted context"
-    IntersectUse loc -> show loc ++ "Linear variabel is not used consistently across branches"    
-    
-    x -> "not ok"
 
 instance Show Mult where
   show Zero = " 0"

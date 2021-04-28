@@ -1,10 +1,11 @@
 module Unnested
 
-import Prelude
+data Void
 
 data Not (A : Type)
 | mk : (A -> Void) -> Not A
 
+(* should be rejected by positivity checker *)
 data Neg
 | mk : Not Neg -> Neg
 

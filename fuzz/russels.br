@@ -1,0 +1,61 @@
+module Russels
+
+(*import Prelude*)
+
+def Id (A : Type)(x y : A): Type = Pi P : A -> Type, P x -> P y
+
+def refl(A : Type)(x : A): Id A x x = fun _ x -> x
+
+def sym(A : Type)(x y : A)(eq : Id A x y): Id A y x = eq (fun z -> Id A z x) (refl A x)
+
+data Void
+
+data Exists (A : Type)(B : A -> Type)
+| mk : Pi x : A, B x -> Exists A B
+
+def proj1(A : Type)(B : A -> Type)(p : Exists A B): A =
+  match p with
+  | mk x _ -> x
+  
+def proj2(A : Type)(B : A -> Type)(p : Exists A B): B (proj1 A B p) =
+  match p return fun (p : Exists A B) -> B (proj1 A B p) with
+  | mk _ x  -> x
+
+data M
+| m : Pi I : Type, (I -> M) -> M
+
+def elem (a : M)(x : M): Type =
+  match x with
+  (* large elimination of x must be rejected *)
+  | m I f -> Exists I (fun i -> Id M a (f i))
+
+def not_elem(a : M)(x : M): Type =
+  elem a x -> Void
+
+def G (a : M): Type = not_elem a a
+
+def R : M = m (Exists M G) (proj1 M G)
+
+def lem_1(X : M)(el : elem X R): not_elem X X =
+  match el with
+  | mk el2 eq -> (
+    match el2
+    return fun (elx : Exists M G) -> Id M (proj1 M G elx) X -> not_elem X X
+    with
+    | mk Y YnY ->
+      fun eq -> eq (fun Z -> not_elem Z Z) YnY) (sym M X (proj1 M G el2) eq)
+
+def lem_2(X : M)(XnX : not_elem X X): elem X R =
+  Russels.Exists.mk
+    (Russels.Exists M G)
+    (fun i -> Id M X (proj1 M G i))
+    (Russels.Exists.mk M G X XnX)
+    (refl M X)
+    
+def lem_3: not_elem R R =
+  fun RnR -> lem_1 R RnR RnR
+
+def lem_4: elem R R =
+  lem_2 R lem_3
+
+def oof : Void = lem_3 lem_4

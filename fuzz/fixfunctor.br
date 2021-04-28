@@ -1,4 +1,5 @@
 module Fixfunctor
 
+(* should be rejected by the positivity checker *)
 data Fix (f : Type -> Type)
 | mk : f (Fix f) -> Fix f
