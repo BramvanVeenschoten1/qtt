@@ -119,8 +119,10 @@ def Less(n m : Nat): Type =
 
 def Leq (n m : Nat): Type = Less n (succ m)
 
-def less_than_zero : Pi n : Nat, Less n zero -> Bottom =
-  nat_rec (fun n -> Less n zero -> Bottom) (fun x -> x) (fun _ _ x -> x)
+def less_than_zero : Pi n : Nat, Less n zero => Bottom =
+  nat_rec (fun n -> Less n zero => Bottom)
+    (fun x -> match0 x Void with)
+    (fun _ _ x -> match0 x Void with)
 
 def less_than_succ : Pi n : Nat, Less n (succ n) =
   nat_rec (fun (n : Nat) -> Less n (succ n)) tt (fun _ ih -> ih)
@@ -140,16 +142,41 @@ def leq_is_less_or_eq : Pi (n m : Nat), Leq n m -> Either (Less n m) (Id Nat n m
         | left l -> left (Less y z) (Id Nat (succ y) (succ z)) l
         | right e -> right (Less y z) (Id Nat (succ y) (succ z)) (cong Nat Nat y z succ e)))
 
-def strong (p : Nat -> Type)(h : Pi x : Nat, (Pi y : Nat, Less y x -> p y) -> p x): Pi (n m : Nat), Less m n -> p m =
-  nat_rec
-    (fun z -> Pi m : Nat, Less m z -> p m)
-    (fun m l -> less_than_zero m l (p m))
-    (fun n ih m l -> match leq_is_less_or_eq m n l with
-      | left l -> ih m l
-      | right e -> sym Nat m n e p (h n ih))
+def trans : Pi (j m k : Nat), Less j m -> Less m (succ k) -> Less j k =
+  nat_rec (fun j -> Pi (m k : Nat), Less j m -> Less m (succ k) -> Less j k)
+    (nat_rec (fun m -> Pi (k : Nat), Less zero m -> Less m (succ k) -> Less zero k)
+      (fun k l1 _ -> less_than_zero zero l1 (Less zero k))
+      (fun m ih -> nat_rec (fun k -> Less zero (succ m) -> Less (succ m) (succ k) -> Less zero k)
+    	(fun l1 l2 -> less_than_zero m l2 (Less zero zero))
+    	(fun k _ l1 l2 -> tt)))
+    (fun j ih -> nat_rec (fun m -> Pi k : Nat, Less (succ j) m -> Less m (succ k) -> Less (succ j) k)
+      (fun k l1 l2 -> less_than_zero (succ j) l1 (Less (succ j) k))
+      (fun m _ -> nat_rec (fun k -> Less (succ j) (succ m) -> Less (succ m) (succ k) -> Less (succ j) k)
+      	(fun l1 l2 -> less_than_zero m l2 (Less (succ j) zero))
+      	(fun k _ l1 l2 -> ih m k l1 l2)))
 
-def strong_induction (p : Nat -> Type)(h : Pi x : Nat, (Pi y : Nat, Less y x -> p y) -> p x)(n : Nat): p n =
+def strong(p : Nat -> Type)(h : Pi 0 x : Nat, (Pi 0 y : Nat, Less y x => p y) -> p x): Pi (n : Nat)(0 m : Nat), Less m n => p m =
+  nat_rec (fun n -> Pi 0 m : Nat, Less m n => p m)
+    (fun m l -> match0 less_than_zero m l Void with)
+    (fun k ih m l1 -> h m (fun j l2 -> ih j (Nat.trans j m k l2 l1)))
+
+def strong_induction(p : Nat -> Type)(h : Pi 0 x : Nat, (Pi 0 y : Nat, Less y x => p y) -> p x)(n : Nat): p n =
   strong p h (succ n) n (less_than_succ n)
 
-def nat_wf (n : Nat): Acc Nat Less n =
-  strong_induction (Acc Nat Less) (mk Nat Less) n
+def nat_wf(n : Nat): Acc Nat Less n =
+  strong_induction (Acc Nat Less) (Prelude.Acc.mk Nat Less) n
+
+def nat_case(P : Nat -> Type)(pz : P zero)(ps : Pi 1 m : Nat, P (succ m))(1 n : Nat): P n =
+  match1 n return P with
+  | zero -> pz
+  | succ n -> ps n
+
+def nat_fold(P : Nat -> Type)(pz : P zero)(ps : Pi 0 m : Nat, P m -o P (succ m))(1 n : Nat)(acn : Acc Nat Less n): P n =
+  wf_rec Nat Less (fun m -> Pi 1 n : Nat, Id Nat n m -> P m)
+    (fun x f ->
+      nat_case (fun n -> Id Nat n x -> P x)
+    	(fun e -> e P pz)
+    	(fun m e -> e P (ps m (f m (e (fun k -> Less m k) (less_than_succ m)) m (refl Nat m)))))
+    n acn n (refl Nat n)
+    
+  

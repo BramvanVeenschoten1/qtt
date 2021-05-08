@@ -67,9 +67,10 @@ def distinct (eq : Id Bool true false): Void =
  
 (* Accessible *)
 
-data Acc(0 A : Type)(0 R : A -> A -> Type)(x : A)
-| mk : (Pi y : A, R y x -> Acc A R y) -> Acc A R x
+data Acc(0 A : Type)(0 R : A -> A -> Type)(0 x : A)
+| mk : (Pi 0 y : A, R y x => Acc A R y) -> Acc A R x
 
-def wf_rec(0 A : Type)(0 R : A -> A -> Type)(0 P : A -> Type)(f : Pi x : A, (Pi y : A, R y x -> P y) -> P x)(x : A)(0 acc_x : Acc A R x): P x =
-  match0 acc_x with
+def wf_rec(0 A : Type)(0 R : A -> A -> Type)(0 P : A -> Type)(f : Pi 0 x : A, (Pi 0 y : A, R y x => P y) -> P x)(0 x : A)(acc_x : Acc A R x): P x =
+  match acc_x with
   | mk g -> f x (fun y lt -> wf_rec A R P f y (g y lt))
+
