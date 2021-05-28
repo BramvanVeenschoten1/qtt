@@ -16,7 +16,7 @@ import Debug.Trace
 
 checkModules :: [Module] -> Either String String
 checkModules mods = case checkProgram (mods, Data.Map.empty, emptyObjects, 0) of
-  Left err -> Left (show err)
+  Left err -> Left err
   Right (_,global_names,obs,_) -> pure (showGlobalNames obs global_names)
 
 checkProgram :: ([Module],GlobalNames,Objects,Int) -> Either Error ([Module],GlobalNames, Objects,Int)
